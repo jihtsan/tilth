@@ -311,12 +311,27 @@ fn extract_root_from_response(msg: &Value) -> Option<PathBuf> {
         let decoded = percent_encoding::percent_decode_str(raw_path)
             .decode_utf8()
             .map_or_else(|_| raw_path.to_string(), std::borrow::Cow::into_owned);
-        let path = PathBuf::from(decoded);
+        let path = local_path(&decoded);
         if path.is_dir() {
             return Some(path);
         }
     }
     None
+}
+
+/// The local path a decoded `file:` URI path names. A URI writes a Windows
+/// drive path as `/C:/x`, and the slash before the drive is not part of it.
+/// Elsewhere `/C:/x` is an ordinary absolute path.
+fn local_path(uri_path: &str) -> PathBuf {
+    match uri_path.strip_prefix('/') {
+        Some(drive_path)
+            if cfg!(windows)
+                && matches!(drive_path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic()) =>
+        {
+            PathBuf::from(drive_path)
+        }
+        _ => PathBuf::from(uri_path),
+    }
 }
 
 #[derive(Deserialize)]
