@@ -1,6 +1,8 @@
 //! PHP language spec.
 
-use crate::lang::spec::{LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = concat!(
     "(function_call_expression function: (name) @callee)\n",
@@ -10,6 +12,17 @@ const CALLEE_QUERY: &str = concat!(
     "(nullsafe_member_call_expression name: (name) @callee)\n",
     "(scoped_call_expression name: (name) @callee)\n",
 );
+
+/// `{$…}` in a double-quoted string and in a backtick command, where a
+/// method call can stand. `$name` and `${name}` name a variable.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"`",
+    marked: None,
+    holes: &[Hole {
+        opens: b"{$",
+        closes: b'}',
+    }],
+};
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "PHP",
@@ -25,6 +38,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: false,
     hash_comments: true,
     names: NameRule::PLAIN,
+    interpolation: Some(INTERPOLATION),
     strip_family: None,
     extract_receiver: None,
     callee_filter: None,

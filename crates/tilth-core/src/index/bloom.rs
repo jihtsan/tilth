@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use fastbloom::BloomFilter;
 
 use crate::lang::detect_file_type;
-use crate::lang::spec::NameRule;
+use crate::lang::spec::{Interpolation, NameRule};
 use crate::types::{FileType, Lang};
 
 // ---------------------------------------------------------------------------
@@ -175,7 +175,9 @@ fn build_filter(content: &str, lang: Option<Lang>) -> BloomFilter {
 // ---------------------------------------------------------------------------
 
 /// Extract identifier tokens from source code using a simple byte-level
-/// state machine. Skips string literals and block/line comments.
+/// state machine. Skips string literals and block/line comments, but reads
+/// the code in a string's holes (`${…}` in a JavaScript template, `#{…}` in
+/// Ruby) as code, by the language's [`Interpolation`].
 ///
 /// An identifier is a name by the language's [`NameRule`], the rule its
 /// grammar reads names by, so the filter holds every name a parse of the
@@ -198,20 +200,48 @@ fn extract_identifiers(content: &str, lang: Option<Lang>) -> impl Iterator<Item 
 /// States for the identifier extraction state machine.
 #[derive(Clone, Copy)]
 enum ScanState {
-    /// Normal code scanning.
+    /// Normal code scanning, also inside a string's hole.
     Code,
-    /// Inside a double-quoted string.
-    StringDouble,
-    /// Inside a single-quoted string/char.
-    StringSingle,
-    /// Inside a backtick string (JS template literals, Go raw strings).
-    StringBacktick,
-    /// Inside a triple-quoted string, closed by three of the given quote byte.
-    StringTriple(u8),
+    /// Inside a string literal.
+    Str(Quoted),
     /// Inside a line comment (`// ...`, or `# ...` where the language has it).
     LineComment,
     /// Inside a block comment (/* ... */).
     BlockComment,
+}
+
+/// A string literal: double-quoted, single-quoted, backtick (a JavaScript
+/// template, a Go raw string) or triple-quoted.
+#[derive(Clone, Copy)]
+struct Quoted {
+    /// The quote that closes it.
+    quote: u8,
+    /// Whether three of `quote` close it.
+    triple: bool,
+    /// Whether its holes are code, by the language's [`Interpolation`].
+    holds_code: bool,
+}
+
+/// A hole the scan is in: code inside a string, up to the byte that
+/// closes the hole.
+struct OpenHole {
+    /// The state to resume when the hole closes: the string it is in, or
+    /// code for a shell's backtick outside a string.
+    resume: ScanState,
+    /// The byte that closes the hole.
+    closes: u8,
+    /// The brackets of the closing kind opened inside the hole and not yet
+    /// closed.
+    depth: usize,
+}
+
+/// The opening bracket of `close`, when it is a closing bracket.
+const fn opening_bracket(close: u8) -> Option<u8> {
+    match close {
+        b'}' => Some(b'{'),
+        b')' => Some(b'('),
+        _ => None,
+    }
 }
 
 struct IdentifierIter<'a> {
@@ -223,12 +253,19 @@ struct IdentifierIter<'a> {
     names: NameRule,
     triple_quotes: bool,
     hash_comments: bool,
+    interpolation: Option<Interpolation>,
+    /// Whether a backtick in code opens a hole, as a shell's command
+    /// substitution does inside a string and out.
+    code_backticks: bool,
+    /// The holes the scan is in, innermost last.
+    holes: Vec<OpenHole>,
     /// The name just returned without its trailing mark, returned next.
     pending: Option<&'a str>,
 }
 
 impl<'a> IdentifierIter<'a> {
     fn new(content: &'a str, lang: Option<Lang>) -> Self {
+        let interpolation = lang.and_then(Lang::interpolation);
         Self {
             bytes: content.as_bytes(),
             src: content,
@@ -238,6 +275,10 @@ impl<'a> IdentifierIter<'a> {
             names: lang.map_or(NameRule::PLAIN, Lang::names),
             triple_quotes: lang.is_some_and(Lang::has_triple_quoted_strings),
             hash_comments: lang.is_some_and(Lang::has_hash_comments),
+            interpolation,
+            code_backticks: interpolation
+                .is_some_and(|rule| rule.holes.iter().any(|hole| hole.opens == b"`")),
+            holes: Vec::new(),
             pending: None,
         }
     }
@@ -261,6 +302,49 @@ impl<'a> IdentifierIter<'a> {
         }
         &src[start..self.pos]
     }
+
+    /// Open the string whose opening quote, three of them when `triple`,
+    /// starts at `at`, leaving `pos` after it.
+    fn open_string(&mut self, at: usize, quote: u8, triple: bool) {
+        let before = &self.bytes[..at];
+        let holds_code = self.interpolation.is_some_and(|rule| {
+            rule.quotes.contains(&quote) && rule.marked.is_none_or(|marked| marked(before))
+        });
+        self.state = ScanState::Str(Quoted {
+            quote,
+            triple,
+            holds_code,
+        });
+        self.pos = at + if triple { 3 } else { 1 };
+    }
+
+    /// Step over the hole opener at `at` in the current string, if one
+    /// starts there, and read what follows as code. A one-byte opener
+    /// written twice is that byte as text (`{{` in a Python f-string), and
+    /// is stepped over whole. Returns whether `pos` moved.
+    fn enter_hole(&mut self, at: usize) -> bool {
+        let rest = &self.bytes[at..];
+        let Some(hole) = self
+            .interpolation
+            .and_then(|rule| rule.holes.iter().find(|hole| rest.starts_with(hole.opens)))
+        else {
+            return false;
+        };
+        if let [opener] = hole.opens {
+            if rest.get(1) == Some(opener) {
+                self.pos = at + 2;
+                return true;
+            }
+        }
+        self.holes.push(OpenHole {
+            resume: self.state,
+            closes: hole.closes,
+            depth: 0,
+        });
+        self.state = ScanState::Code;
+        self.pos = at + hole.opens.len();
+        true
+    }
 }
 
 impl<'a> Iterator for IdentifierIter<'a> {
@@ -280,6 +364,22 @@ impl<'a> Iterator for IdentifierIter<'a> {
 
             match self.state {
                 ScanState::Code => {
+                    // In a hole, its closing byte ends it, unless a bracket
+                    // of the same kind opened inside it is still open.
+                    if let Some(hole) = self.holes.last_mut() {
+                        if b == hole.closes {
+                            if hole.depth == 0 {
+                                self.state = hole.resume;
+                                self.holes.pop();
+                                self.pos += 1;
+                                continue;
+                            }
+                            hole.depth -= 1;
+                        } else if Some(b) == opening_bracket(hole.closes) {
+                            hole.depth += 1;
+                        }
+                    }
+
                     // A triple-quoted string first: read quote by quote, `"""` is
                     // an empty string and then an open one, and the first quote
                     // inside flips code and string for the rest of the file.
@@ -287,8 +387,7 @@ impl<'a> Iterator for IdentifierIter<'a> {
                         && (b == b'"' || b == b'\'')
                         && bytes[i..].starts_with(&[b, b, b])
                     {
-                        self.state = ScanState::StringTriple(b);
-                        self.pos += 3;
+                        self.open_string(i, b, true);
                         continue;
                     }
 
@@ -298,9 +397,11 @@ impl<'a> Iterator for IdentifierIter<'a> {
                     // `$#`), as a character literal (`?#`), escaped (`\#`) and
                     // before `[` (an attribute). Misreading code as a comment
                     // loses one line; misreading a comment as code can lose
-                    // the rest of the file, so the rule leans to comment.
+                    // the rest of the file, so the rule leans to comment. A hole
+                    // holds no comment, for the reason given at `/` below.
                     if b == b'#'
                         && self.hash_comments
+                        && self.holes.is_empty()
                         && (i == 0
                             || !(bytes[i - 1].is_ascii_alphanumeric()
                                 || matches!(bytes[i - 1], b'_' | b'$' | b'{' | b'?' | b'\\')))
@@ -313,8 +414,7 @@ impl<'a> Iterator for IdentifierIter<'a> {
 
                     // Check for start of string literals
                     if b == b'"' {
-                        self.state = ScanState::StringDouble;
-                        self.pos += 1;
+                        self.open_string(i, b, false);
                         continue;
                     }
                     if b == b'\'' {
@@ -339,18 +439,28 @@ impl<'a> Iterator for IdentifierIter<'a> {
                             self.pos += 1;
                             continue;
                         }
-                        self.state = ScanState::StringSingle;
-                        self.pos += 1;
+                        self.open_string(i, b, false);
                         continue;
                     }
                     if b == b'`' {
-                        self.state = ScanState::StringBacktick;
-                        self.pos += 1;
+                        if self.code_backticks {
+                            self.holes.push(OpenHole {
+                                resume: ScanState::Code,
+                                closes: b,
+                                depth: 0,
+                            });
+                            self.pos += 1;
+                        } else {
+                            self.open_string(i, b, false);
+                        }
                         continue;
                     }
 
-                    // Check for comments
-                    if b == b'/' && i + 1 < len {
+                    // Check for comments. A hole is one expression and holds
+                    // none: read as a comment, a `//` (Python's floor division)
+                    // or a shell's `/*` would swallow the hole's closing
+                    // bracket, and the scan would lose its place in the file.
+                    if b == b'/' && i + 1 < len && self.holes.is_empty() {
                         if bytes[i + 1] == b'/' {
                             self.state = ScanState::LineComment;
                             self.pos += 2;
@@ -381,43 +491,16 @@ impl<'a> Iterator for IdentifierIter<'a> {
                     self.pos += c.len_utf8();
                 }
 
-                ScanState::StringDouble => {
+                ScanState::Str(string) => {
+                    if string.holds_code && self.enter_hole(i) {
+                        continue;
+                    }
                     if b == b'\\' && i + 1 < len {
                         self.pos += 2; // skip escaped character
-                    } else if b == b'"' {
+                    } else if b == string.quote && !string.triple {
                         self.state = ScanState::Code;
                         self.pos += 1;
-                    } else {
-                        self.pos += 1;
-                    }
-                }
-
-                ScanState::StringSingle => {
-                    if b == b'\\' && i + 1 < len {
-                        self.pos += 2; // skip escaped character
-                    } else if b == b'\'' {
-                        self.state = ScanState::Code;
-                        self.pos += 1;
-                    } else {
-                        self.pos += 1;
-                    }
-                }
-
-                ScanState::StringBacktick => {
-                    if b == b'\\' && i + 1 < len {
-                        self.pos += 2;
-                    } else if b == b'`' {
-                        self.state = ScanState::Code;
-                        self.pos += 1;
-                    } else {
-                        self.pos += 1;
-                    }
-                }
-
-                ScanState::StringTriple(quote) => {
-                    if b == b'\\' && i + 1 < len {
-                        self.pos += 2; // skip escaped character
-                    } else if bytes[i..].starts_with(&[quote, quote, quote]) {
+                    } else if b == string.quote && bytes[i..].starts_with(&[b, b, b]) {
                         self.state = ScanState::Code;
                         self.pos += 3;
                     } else {
@@ -893,6 +976,160 @@ mod tests {
         assert_eq!(php, ["order", "save"]);
         let rust: Vec<&str> = extract_identifiers("validate!(x);\n", Some(Lang::Rust)).collect();
         assert_eq!(rust, ["validate", "x"]);
+    }
+
+    /// A string's text is skipped, but the code in its holes is read as code,
+    /// by each language's rule (#398). `text` stands in the string's text and
+    /// `code` in a hole.
+    #[test]
+    fn interpolated_code_is_read_as_code() {
+        for (lang, src) in [
+            (Lang::JavaScript, "s = `text ${code(x)} text`;\n"),
+            (Lang::TypeScript, "s = `text ${code(x)} text`;\n"),
+            (Lang::Tsx, "s = `text ${code(x)} text`;\n"),
+            (Lang::Ruby, "s = \"text #{code(x)} text\"\n"),
+            (Lang::Ruby, "s = `text #{code(x)} text`\n"),
+            (Lang::Elixir, "s = \"text #{code(x)} text\"\n"),
+            (Lang::Elixir, "s = \"\"\"\ntext #{code(x)} text\n\"\"\"\n"),
+            (Lang::Elixir, "s = 'text #{code(x)} text'\n"),
+            (Lang::Kotlin, "val s = \"text ${code(x)} text\"\n"),
+            (Lang::Kotlin, "val s = \"\"\"text ${code(x)} text\"\"\"\n"),
+            (Lang::Scala, "val s = s\"text ${code(x)} text\"\n"),
+            (Lang::Scala, "val s = raw\"\"\"text ${code(x)} text\"\"\"\n"),
+            (Lang::Swift, "let s = \"text \\(code(x)) text\"\n"),
+            (
+                Lang::Swift,
+                "let s = \"\"\"\ntext \\(code(x)) text\n\"\"\"\n",
+            ),
+            (Lang::Python, "s = f\"text {code(x)} text\"\n"),
+            (Lang::Python, "s = rf'text {code(x)} text'\n"),
+            (Lang::Python, "s = F\"\"\"text {code(x)} text\"\"\"\n"),
+            (Lang::CSharp, "var s = $\"text {code(x)} text\";\n"),
+            (Lang::CSharp, "var s = $@\"text {code(x)} text\";\n"),
+            (Lang::Bash, "s=\"text $(code x) text\"\n"),
+            (Lang::Bash, "s=\"text `code x` text\"\n"),
+            (Lang::Bash, "s=`code x`\n"),
+            (Lang::Php, "$s = \"text {$code->x()} text\";\n"),
+        ] {
+            let idents: Vec<&str> = extract_identifiers(src, Some(lang)).collect();
+            assert!(
+                idents.contains(&"code"),
+                "{lang:?}: the hole in {src:?} was skipped: {idents:?}"
+            );
+            assert!(
+                !idents.contains(&"text"),
+                "{lang:?}: the text of {src:?} leaked: {idents:?}"
+            );
+        }
+    }
+
+    /// A hole is code to its own closing bracket: a bracket or a string
+    /// opened inside it, even a string with holes of its own, closes inside
+    /// it, and the string resumes after it.
+    #[test]
+    fn a_hole_closes_at_its_own_bracket() {
+        for (lang, src) in [
+            (
+                Lang::JavaScript,
+                "s = `${ {k: inner}.k } text ${`text ${deep()}`} text`; after();\n",
+            ),
+            (
+                Lang::Ruby,
+                "s = \"#{ {k: inner}[:k] } text #{\"text #{deep}\"} text\"; after\n",
+            ),
+            (
+                Lang::Python,
+                "s = f\"{ {'k': inner}['k'] } text {f'text {deep()}'} text\"; after()\n",
+            ),
+            (
+                Lang::Swift,
+                "let s = \"\\((inner)) text \\(\"text \\(deep())\") text\"; after()\n",
+            ),
+            (
+                Lang::Bash,
+                "s=\"$( (inner) ) text $(echo \"text $(deep)\") text\"; after\n",
+            ),
+        ] {
+            let idents: Vec<&str> = extract_identifiers(src, Some(lang)).collect();
+            for name in ["inner", "deep", "after"] {
+                assert!(
+                    idents.contains(&name),
+                    "{lang:?}: {name:?} not in {idents:?} from {src:?}"
+                );
+            }
+            assert!(
+                !idents.contains(&"text"),
+                "{lang:?}: the text of {src:?} leaked: {idents:?}"
+            );
+        }
+    }
+
+    /// A hole is one expression and holds no comment. Read as comments,
+    /// Python's floor division `//` or a shell's `#` and `/*` would swallow
+    /// the hole's closing bracket, and the scan would lose its place for the
+    /// rest of the file.
+    #[test]
+    fn a_hole_holds_no_comment() {
+        for (lang, src) in [
+            (Lang::Python, "s = f\"{a // inner} text\"; after()\n"),
+            (
+                Lang::Bash,
+                "s=\"$(inner ${p##*/}) $(dirname ${p%/*}) text\"; after\n",
+            ),
+        ] {
+            let idents: Vec<&str> = extract_identifiers(src, Some(lang)).collect();
+            for name in ["inner", "after"] {
+                assert!(
+                    idents.contains(&name),
+                    "{lang:?}: {name:?} not in {idents:?} from {src:?}"
+                );
+            }
+            assert!(
+                !idents.contains(&"text"),
+                "{lang:?}: the text of {src:?} leaked: {idents:?}"
+            );
+        }
+    }
+
+    /// Text that only looks like a hole stays text: an escaped opener, a
+    /// doubled brace in a format string, and a string the language does not
+    /// interpolate. Read as a hole, a lone `{` in such a string would leave
+    /// the scan in code at its closing quote, and the next quote would open a
+    /// string that swallows the rest of the file.
+    #[test]
+    fn text_that_only_looks_like_a_hole_stays_text() {
+        for (lang, src) in [
+            (Lang::JavaScript, "s = `\\${text}`; after();\n"),
+            (Lang::Ruby, "s = \"\\#{text}\" + 'it#{text}'; after\n"),
+            (Lang::Kotlin, "val s = \"\\${text}\"; after()\n"),
+            (Lang::Swift, "let s = \"\\\\(text)\"; after()\n"),
+            (
+                Lang::Python,
+                "s = f\"{{text}}\" + \"{\" + r'{' + '{'; after()\n",
+            ),
+            (Lang::Python, "if\"{\" in s: after()\n"),
+            (
+                Lang::CSharp,
+                "var s = $\"{{text}}\" + \"{\" + @\"{\"; after();\n",
+            ),
+            (Lang::Scala, "val s = \"${\" + \"$\"; after()\n"),
+            (Lang::Go, "s := `${text}`; after()\n"),
+            (Lang::Rust, "let s = format!(\"{text}\"); after();\n"),
+            (Lang::Bash, "s='$(text)'; after\n"),
+            (Lang::Bash, "s=\"${text##*/} ${text%/*}\"; after\n"),
+            (Lang::Php, "$s = \"${text}\"; after();\n"),
+            (Lang::Php, "$s = '{$text}'; after();\n"),
+        ] {
+            let idents: Vec<&str> = extract_identifiers(src, Some(lang)).collect();
+            assert!(
+                idents.contains(&"after"),
+                "{lang:?}: {src:?} swallowed the code after it: {idents:?}"
+            );
+            assert!(
+                !idents.contains(&"text"),
+                "{lang:?}: the text of {src:?} leaked: {idents:?}"
+            );
+        }
     }
 
     #[test]

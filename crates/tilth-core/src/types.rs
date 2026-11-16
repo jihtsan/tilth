@@ -55,6 +55,13 @@ impl Lang {
     pub(crate) fn names(self) -> crate::lang::spec::NameRule {
         crate::lang::spec::spec(self).names
     }
+
+    /// How a string holds code in this language, or `None` when no string
+    /// does. A lexer that skips every string whole never holds the names
+    /// called in a JavaScript template's `${…}`.
+    pub(crate) fn interpolation(self) -> Option<crate::lang::spec::Interpolation> {
+        crate::lang::spec::spec(self).interpolation
+    }
 }
 
 /// File type as detected by extension. Determines outline strategy.

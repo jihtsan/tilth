@@ -17,6 +17,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: false,
     hash_comments: false,
     names: crate::lang::javascript::NAMES,
+    interpolation: Some(crate::lang::javascript::INTERPOLATION),
     strip_family: Some(StripFamily::JsTs),
     extract_receiver: None,
     callee_filter: None,

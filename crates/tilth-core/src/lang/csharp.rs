@@ -1,7 +1,8 @@
 //! C# language spec.
 
 use crate::lang::spec::{
-    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS,
+    DEFAULT_DEF_KINDS,
 };
 
 const CALLEE_QUERY: &str = concat!(
@@ -13,6 +14,25 @@ const SIBLING_QUERY: &str = concat!(
     "(member_access_expression expression: (this_expression) name: (identifier) @ref)\n",
     "(invocation_expression function: (member_access_expression expression: (this_expression) name: (identifier) @ref))\n",
 );
+
+/// `{…}` in an interpolated string: `$"…"`, `$@"…"`, `@$"…"`.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"",
+    marked: Some(follows_a_dollar),
+    holes: &[Hole {
+        opens: b"{",
+        closes: b'}',
+    }],
+};
+
+/// Whether the `$` and `@` that end `before` hold a `$`.
+fn follows_a_dollar(before: &[u8]) -> bool {
+    before
+        .iter()
+        .rev()
+        .take_while(|&&b| matches!(b, b'$' | b'@'))
+        .any(|&b| b == b'$')
+}
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "C#",
@@ -28,6 +48,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: true,
     hash_comments: false,
     names: NameRule::PLAIN,
+    interpolation: Some(INTERPOLATION),
     strip_family: Some(StripFamily::JavaKotlinCSharp),
     extract_receiver: None,
     callee_filter: None,

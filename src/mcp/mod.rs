@@ -491,6 +491,8 @@ const PANICKED: &str = "tool panicked during execution";
 fn run_tool(services: &Services, tool_name: &str, args: &Value) -> Result<String, String> {
     if tool_name == "tilth_write" {
         return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(feature = "panic-probe")]
+            panic_probe(args);
             dispatch_tool(tool_name, args, services)
         }))
         .unwrap_or_else(|_| Err(PANICKED.into()));
@@ -501,6 +503,8 @@ fn run_tool(services: &Services, tool_name: &str, args: &Value) -> Result<String
     let args_owned = args.clone();
 
     let outcome = spawn_with_timeout(services.tracker(), timeout, move || {
+        #[cfg(feature = "panic-probe")]
+        panic_probe(&args_owned);
         dispatch_tool(&tool_name_owned, &args_owned, &services_worker)
     });
 
@@ -514,6 +518,14 @@ fn run_tool(services: &Services, tool_name: &str, args: &Value) -> Result<String
         )),
         Err(SpawnFailure::Panic) => Err(PANICKED.into()),
     }
+}
+
+/// Panic when a call's arguments hold `panic_probe`, so
+/// `tests/mcp_panic.rs` can check that the server survives a panic on each
+/// path a call runs. Only that test enables the feature.
+#[cfg(feature = "panic-probe")]
+fn panic_probe(args: &Value) {
+    assert!(args.get("panic_probe").is_none(), "the call asked to panic");
 }
 
 fn build_tool_response(id: Option<Value>, result: Result<String, String>) -> JsonRpcResponse {
