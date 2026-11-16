@@ -210,12 +210,12 @@ An agent with grep can find where a piece of text appears. To find out who calls
 ## Install
 
 ```bash
-cargo install tilth
+cargo install tilth --locked
 # or
-npx tilth
+npm install -g tilth
 ```
 
-Prebuilt binaries are on the [releases page](https://github.com/jahala/tilth/releases).
+Prebuilt binaries for macOS (arm64, x86_64), Linux (arm64, x86_64) and Windows (x86_64) are on the [releases page](https://github.com/jahala/tilth/releases).
 
 ### MCP server
 
