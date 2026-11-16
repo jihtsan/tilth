@@ -79,6 +79,10 @@ fn serve(dir: &Path, calls: &[(&str, Value)]) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "by design: Windows forbids a newline in a file name"
+)]
 fn a_file_name_with_a_newline_prints_escaped_from_every_tool() {
     let dir = project();
     let evil = dir.path().join(EVIL);

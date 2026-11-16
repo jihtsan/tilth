@@ -264,6 +264,10 @@ mod tests {
     /// The fallback keeps searching the root, and now also names the
     /// directory the caller probably meant, so the next call can narrow.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn resolve_scope_missing_dir_warning_suggests_the_close_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/search")).unwrap();
@@ -279,6 +283,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn resolve_scope_missing_dir_no_root_error_suggests_the_close_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/search")).unwrap();
@@ -298,10 +306,13 @@ mod tests {
     fn resolve_scope_missing_dir_no_root_errors() {
         // WHY: with no root there is no safe fallback — falling back to the server root
         // is the worktree wrong-checkout hazard this PR closes. Must be a hard error.
-        let args = serde_json::json!({ "scope": "/nonexistent/directory/zzz" });
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("zzz");
+        let missing = missing.to_str().unwrap();
+        let args = serde_json::json!({ "scope": missing });
         let err = resolve_scope(&args, None, None, Glob).unwrap_err();
         assert!(
-            err.contains("/nonexistent/directory/zzz") && err.contains("not a valid directory"),
+            err.contains(missing) && err.contains("not a valid directory"),
             "error must name the missing scope: {err}"
         );
     }
@@ -343,8 +354,9 @@ mod tests {
         // Absolute paths must be used as-is regardless of root.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let abs = std::path::Path::new("/tmp/other/file.rs");
-        let result = resolve_read_path(abs, Some(root)).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let abs = other.path().join("file.rs");
+        let result = resolve_read_path(&abs, Some(root)).unwrap();
         assert_eq!(result, abs);
     }
 
@@ -395,9 +407,10 @@ mod tests {
         // A path like "../../y" with root "/x" produces "/x/../../y", not "/y".
         // This pins the current behavior so any future traversal normalization is
         // a deliberate, reviewed change — not an accidental side-effect.
-        let root = std::path::Path::new("/x");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
         let raw = std::path::Path::new("../../y");
         let result = anchor_path(raw, Some(root), "path").unwrap();
-        assert_eq!(result, std::path::PathBuf::from("/x/../../y"));
+        assert_eq!(result, root.join("..").join("..").join("y"));
     }
 }

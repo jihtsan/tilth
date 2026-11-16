@@ -226,13 +226,16 @@ mod tests {
         // Fail closed: running git inside a nonexistent root would surface as
         // a cryptic spawn error (or fall back to the wrong checkout). Refuse
         // up front with the one-step recovery instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("zzz");
+        let missing = missing.to_str().unwrap();
         let args = serde_json::json!({
             "source": "uncommitted",
-            "root": "/nonexistent/checkout/zzz",
+            "root": missing,
         });
         let err = tool_diff(&args, WalkConfig::default(), None).unwrap_err();
         assert!(
-            err.contains("/nonexistent/checkout/zzz") && err.contains("not a valid directory"),
+            err.contains(missing) && err.contains("not a valid directory"),
             "refusal must name the bad root: {err}"
         );
     }

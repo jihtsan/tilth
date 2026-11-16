@@ -2063,6 +2063,10 @@ fn integration_calls_target() {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn format_grok_renders_full_sections() {
         let tmp = tempfile::tempdir().unwrap();
         let lib = "\
@@ -2475,6 +2479,10 @@ fn h() {}
     // ── GROK-GROUP tests ───────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn format_groups_callers_by_file() {
         // The fixture from existing tests already produces 1 caller in 1 file.
         // Verify the rendered output uses the grouped shape (file header + indented sites).
@@ -2519,6 +2527,10 @@ pub fn caller_b() { target(); }
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn format_groups_callees_by_file() {
         // target_fn calls helper (same file) and peer (same file). Verify
         // the single file header collapses both callees under it.

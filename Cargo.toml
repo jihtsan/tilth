@@ -89,8 +89,10 @@ required-features = ["panic-probe"]
 workspace = true
 
 [dependencies]
-# The parsing substrate: language detection, outlines, imports, callers, deps
-tilth-core = { path = "crates/tilth-core", version = "0.15.0" }
+# The parsing substrate: language detection, outlines, imports, callers, deps.
+# Pinned exactly: the binary uses the library's hidden modules, which a patch
+# release may change.
+tilth-core = { path = "crates/tilth-core", version = "=0.15.0" }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -152,7 +154,7 @@ libc = "0.2"
 tempfile = { workspace = true }
 # tests/expect_reasons.rs parses every source file to read its #[expect] reasons
 syn = { version = "2", features = ["full", "visit"] }
-tilth-core = { path = "crates/tilth-core", version = "0.15.0", features = ["test-fixtures"] }
+tilth-core = { path = "crates/tilth-core", version = "=0.15.0", features = ["test-fixtures"] }
 
 [profile.release]
 opt-level = 3

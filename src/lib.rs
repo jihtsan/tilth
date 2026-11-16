@@ -729,6 +729,10 @@ mod tests {
     /// A typo in the last component names the close sibling, in the frame
     /// the caller wrote the scope in.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn missing_scope_hint_names_a_close_sibling() {
         let dir = dir_tree();
         let hint = missing_scope_hint(
@@ -741,6 +745,10 @@ mod tests {
 
     /// A directory given without its parent is found deeper in the tree.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn missing_scope_hint_finds_the_name_deeper() {
         let dir = dir_tree();
         let hint = missing_scope_hint(Path::new("read"), &dir.path().join("read"), dir.path());

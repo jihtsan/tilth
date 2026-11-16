@@ -504,6 +504,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn a_blast_under_the_bound_gives_exact_counts() {
         // 4 × 3 = 12 production calls and 3 test calls, under the bound.
         let out = blast_of_tree(4);

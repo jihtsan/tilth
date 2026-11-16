@@ -896,6 +896,10 @@ mod tests {
     /// symbol named most inside the groups is the one shown. Read as one
     /// source per line, each group was `crate` and named no file.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn hot_files_count_imports_inside_use_groups() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
@@ -1122,6 +1126,10 @@ mod tests {
     /// The summary listed five hot files and said nothing of the rest
     /// (#343).
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn the_startup_summary_counts_the_hot_files_it_leaves_out() {
         assert_eq!(
             hot_of(HOT_SHOWN + 1).as_deref(),

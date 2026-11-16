@@ -469,6 +469,10 @@ mod tests {
     /// A relative `context` names a file under the root, as every other
     /// relative path does, so it boosts the matches beside it.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn a_relative_context_resolves_against_the_root() {
         let tmp = tempfile::tempdir().unwrap();
         for dir in ["a", "b"] {

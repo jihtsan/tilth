@@ -144,7 +144,12 @@ fn a_missing_git_is_named_in_the_diff_error() {
         std::fs::write(repo.path().join(name), "").expect("write file");
     }
     let no_git = tempfile::tempdir().expect("create tempdir");
-    let not_found = std::io::Error::from_raw_os_error(2);
+    // The platform's words for a program it cannot find: the OS error on
+    // Unix, the standard library's own message on Windows. Asked of a name
+    // no system has, because Windows looks past a child's PATH for `git`.
+    let not_found = Command::new("tilth-test-no-such-program")
+        .output()
+        .expect_err("no such program");
     for (args, command) in [
         (&["diff"][..], "rev-parse"),
         (&["diff", "--log", "HEAD~1..HEAD"][..], "rev-parse"),

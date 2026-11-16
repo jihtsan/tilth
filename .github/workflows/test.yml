@@ -1,0 +1,38 @@
+name: Test
+
+# The test suite on every platform a release ships a binary for. It runs
+# when a change can alter a test's outcome: the code, the tests, the
+# prompts the binary embeds, the toolchain, the manifests or a workflow.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "src/**"
+      - "crates/**"
+      - "tests/**"
+      - "prompts/**"
+      - "Cargo.*"
+      - "rust-toolchain.toml"
+      - ".github/workflows/**"
+  pull_request:
+    paths: *paths
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # ratchet:Swatinem/rust-cache@v2
+      # Every failing test, not only the first failing test binary's.
+      - run: cargo test --locked --workspace --no-fail-fast

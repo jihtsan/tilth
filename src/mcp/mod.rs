@@ -311,12 +311,27 @@ fn extract_root_from_response(msg: &Value) -> Option<PathBuf> {
         let decoded = percent_encoding::percent_decode_str(raw_path)
             .decode_utf8()
             .map_or_else(|_| raw_path.to_string(), std::borrow::Cow::into_owned);
-        let path = PathBuf::from(decoded);
+        let path = local_path(&decoded);
         if path.is_dir() {
             return Some(path);
         }
     }
     None
+}
+
+/// The local path a decoded `file:` URI path names. A URI writes a Windows
+/// drive path as `/C:/x`, and the slash before the drive is not part of it.
+/// Elsewhere `/C:/x` is an ordinary absolute path.
+fn local_path(uri_path: &str) -> PathBuf {
+    match uri_path.strip_prefix('/') {
+        Some(drive_path)
+            if cfg!(windows)
+                && matches!(drive_path.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic()) =>
+        {
+            PathBuf::from(drive_path)
+        }
+        _ => PathBuf::from(uri_path),
+    }
 }
 
 #[derive(Deserialize)]
@@ -587,11 +602,22 @@ mod tests {
 
     // -- extract_root_from_response -------------------------------------------
 
+    /// `dir` as a client names it in a roots answer: `file:///Users/x/project`,
+    /// or `file:///C:/Users/x/project` on Windows.
+    fn client_uri(dir: &Path) -> String {
+        let path = dir.to_string_lossy().replace('\\', "/");
+        if path.starts_with('/') {
+            format!("file://{path}")
+        } else {
+            format!("file:///{path}")
+        }
+    }
+
     #[test]
     fn extract_root_valid_file_uri() {
         // Claude Code sends: {"result":{"roots":[{"uri":"file:///Users/x/project"}]}}
         let tmp = tempfile::tempdir().unwrap();
-        let uri = format!("file://{}", tmp.path().to_string_lossy());
+        let uri = client_uri(tmp.path());
         let msg = serde_json::json!({
             "result": { "roots": [{ "uri": uri }] }
         });
@@ -604,8 +630,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let space_dir = tmp.path().join("my project");
         std::fs::create_dir(&space_dir).unwrap();
-        let encoded = format!("file://{}", tmp.path().to_string_lossy()).replace(' ', "%20")
-            + "/my%20project";
+        let encoded = client_uri(tmp.path()).replace(' ', "%20") + "/my%20project";
         let msg = serde_json::json!({
             "result": { "roots": [{ "uri": encoded }] }
         });
@@ -636,10 +661,29 @@ mod tests {
         assert_eq!(extract_root_from_response(&msg), None);
     }
 
+    /// VS Code names a Windows drive in lower case with its colon encoded.
+    #[cfg(windows)]
+    #[test]
+    fn extract_root_encoded_drive_uri() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = client_uri(tmp.path());
+        let (drive, rest) = uri["file:///".len()..].split_at(2);
+        let encoded = format!("file:///{}%3A{rest}", drive[..1].to_ascii_lowercase());
+        let msg = serde_json::json!({
+            "result": { "roots": [{ "uri": encoded }] }
+        });
+        let path = extract_root_from_response(&msg).expect("the root is a directory");
+        // The drive letter's case differs, so compare what both resolve to.
+        assert_eq!(
+            path.canonicalize().unwrap(),
+            tmp.path().canonicalize().unwrap()
+        );
+    }
+
     #[test]
     fn extract_root_multiple_roots_takes_first_valid() {
         let tmp = tempfile::tempdir().unwrap();
-        let uri = format!("file://{}", tmp.path().to_string_lossy());
+        let uri = client_uri(tmp.path());
         let msg = serde_json::json!({
             "result": { "roots": [
                 { "uri": "file:///nonexistent" },
