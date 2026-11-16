@@ -269,8 +269,7 @@ mod tests {
         for enabled in [false, true] {
             let rels: HashSet<String> = walk_paths_with_gitignore(tmp.path(), enabled)
                 .iter()
-                .filter_map(|p| p.strip_prefix(tmp.path()).ok())
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|p| crate::test_paths::relative(p, tmp.path()))
                 .collect();
             assert!(
                 rels.contains("visible.rs"),
@@ -418,8 +417,7 @@ mod tests {
             };
             let got: Vec<String> = collect_walk_paths(walker(walk).expect("walker failed"))
                 .iter()
-                .filter_map(|p| p.strip_prefix(tmp.path()).ok())
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| crate::test_paths::relative(p, tmp.path()))
                 .collect();
             assert_eq!(
                 got, want,

@@ -144,7 +144,12 @@ fn a_missing_git_is_named_in_the_diff_error() {
         std::fs::write(repo.path().join(name), "").expect("write file");
     }
     let no_git = tempfile::tempdir().expect("create tempdir");
-    let not_found = std::io::Error::from_raw_os_error(2);
+    // The platform's words for a program missing from PATH: the OS error on
+    // Unix, the standard library's own message on Windows.
+    let not_found = Command::new("git")
+        .env("PATH", no_git.path())
+        .output()
+        .expect_err("no git on an empty PATH");
     for (args, command) in [
         (&["diff"][..], "rev-parse"),
         (&["diff", "--log", "HEAD~1..HEAD"][..], "rev-parse"),

@@ -27,6 +27,8 @@ pub mod search;
 pub mod shown;
 #[doc(hidden)]
 pub mod source;
+#[cfg(test)]
+mod test_paths;
 #[cfg(any(test, feature = "test-fixtures"))]
 #[doc(hidden)]
 pub mod test_readers;

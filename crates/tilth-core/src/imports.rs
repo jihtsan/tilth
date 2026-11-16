@@ -1317,7 +1317,7 @@ mod tests {
         let content = fs::read_to_string(&file).unwrap();
         resolve_related_files_with_content(&file, &content)
             .iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .map(|p| crate::test_paths::relative(p, root))
             .collect()
     }
 

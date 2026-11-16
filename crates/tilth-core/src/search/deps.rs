@@ -871,7 +871,7 @@ mod tests {
             .used_by
             .into_iter()
             .map(|d| {
-                let rel = |p: &Path| p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                let rel = |p: &Path| crate::test_paths::relative(p, root);
                 (
                     rel(&d.path),
                     d.symbols.into_iter().map(|(_, s, _)| s).collect(),
@@ -1449,15 +1449,7 @@ mod tests {
         let mut dependents: Vec<(String, bool)> = result
             .used_by
             .iter()
-            .map(|d| {
-                let rel = d
-                    .path
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                (rel, d.same_package)
-            })
+            .map(|d| (crate::test_paths::relative(&d.path, &root), d.same_package))
             .collect();
         dependents.sort();
         (dependents, result.importable)
