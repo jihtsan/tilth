@@ -870,7 +870,7 @@ dependencies = [
  "serde_json",
  "streaming-iterator",
  "strsim",
- "syn 3.0.3",
+ "syn 2.0.119",
  "tempfile",
  "terminal_size",
  "tilth-core",
