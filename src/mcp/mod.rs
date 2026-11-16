@@ -319,7 +319,8 @@ fn handle_request(req: &JsonRpcRequest, services: &Services) -> JsonRpcResponse 
             // once it knows no root is coming.
             let overview = match services.root() {
                 Some(root) if services.config().overview => {
-                    crate::overview::fingerprint(root, services.config().walk)
+                    let deadline = std::time::Instant::now() + crate::overview::LIMIT;
+                    crate::overview::fingerprint(root, services.config().walk, deadline)
                 }
                 _ => String::new(),
             };

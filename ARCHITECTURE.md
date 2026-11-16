@@ -256,9 +256,9 @@ methods worth describing in detail:
   as a pre-flight gate naming the exact Bash commands and host tools to
   avoid, with concrete `<bad>→<good>` rewrites. When
   `Config::overview` is on (no `TILTH_NO_OVERVIEW`, no `--no-overview`),
-  `overview::fingerprint(root, walk)` is prepended, for the server's root at
-  that moment — a project summary built in <250ms (a stderr warning fires
-  if it overruns).
+  `overview::fingerprint(root, walk, deadline)` is prepended, for the
+  server's root at that moment — a project summary that stops at a 250 ms
+  deadline and leaves out what it had not finished.
 - `tools/list` — returns the tool schemas. `tools/call` is the workhorse
   and goes through `handle_tool_call`.
 
@@ -1116,7 +1116,7 @@ strategic guidance every host gets at `initialize`. It lives in
 agents kept reaching for those despite earlier "DO NOT use
 Grep/Read/Glob" rules. Edit mode appends an `EDIT_MODE_EXTRA` block
 from `prompts/mcp-edit.md` with the `tilth_write` instructions.
-`overview::fingerprint(root, walk)` is prepended unless `Config::overview` is
+`overview::fingerprint(root, walk, deadline)` is prepended unless `Config::overview` is
 off — a brief summary of language counts, manifests, hot files,
 and git context.
 
@@ -1168,18 +1168,22 @@ A handful of small files cut across every subsystem.
 Three modules sit outside the search/read flow but are still
 user-facing.
 
-- **`overview.rs`** — `fingerprint(root, walk)` counts source files
+- **`overview.rs`** — `fingerprint(root, walk, deadline)` counts source files
   with the shared walker, up to 10,000 walk entries (a count cut short
   reads "N+ source files"), and takes the primary language from that
   count. A second walk of the top two directory levels feeds the
   `dirs`, `hot` and `tests` lines. It parses the project manifest (`Cargo.toml`,
   `package.json`, `go.mod`, `pyproject.toml`), reads `git` context
-  (branch and uncommitted file count from one `git status`, with one
-  200 ms deadline for the whole line, which is left out when git does
-  not answer by then), and emits a few
-  hot-file lines. Wrapped in `catch_unwind` and a 250ms wall-clock
-  budget; warn-on-overrun via stderr. Output is the project summary
-  that the MCP `initialize` response prepends to `SERVER_INSTRUCTIONS`.
+  (branch and uncommitted file count from one `git status`), and emits a
+  few hot-file lines. Every part takes one deadline, 250 ms
+  (`overview::LIMIT`) from the call, and checks it between its steps: a
+  count cut short reads as a lower bound, and any other part not done in
+  time is left out, so a deadline already past gives an empty overview.
+  A step that blocks (a slow read or stat) can still run past it. When
+  the overview stops at its deadline, stderr says so and how far past it
+  ended. Wrapped in `catch_unwind`. Output is the project
+  summary that the MCP `initialize` response prepends to
+  `SERVER_INSTRUCTIONS`.
 - **`map.rs`** — `tilth --map` generates a structural codebase tree:
   per-directory token estimates, top-level symbols per file, depth
   control. CLI-only — the MCP boundary doesn't expose it (no schema
