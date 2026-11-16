@@ -35,8 +35,8 @@ pub mod types;
 
 pub use error::TilthError;
 pub use imports::{
-    extract_imports, is_external, is_import_line, resolve_related_files_with_content, Import,
-    ImportKind,
+    extract_imports, is_external, is_import_line, resolve_related_files_with_content,
+    rust_mod_declarations, Import, ModDecl,
 };
 pub use index::bloom::BloomFilterCache;
 pub use lang::outline::{extract_import_source, get_outline_entries};

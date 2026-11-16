@@ -741,15 +741,15 @@ fn hot_files(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Opti
             continue;
         };
 
-        // Resolve imports to actual file paths using the proven import resolver
-        let imports = tilth_core::extract_imports(&content, file_lang);
-        for target_path in tilth_core::imports::resolve_imports(&full, file_lang, &imports) {
+        // Resolve imports to actual file paths using the proven import
+        // resolver, which counts a Rust `mod` declaration as an import too.
+        for target_path in tilth_core::resolve_related_files_with_content(&full, &content) {
             *path_counts.entry(target_path).or_insert(0) += 1;
         }
 
         // Collect import source strings for symbol extraction
-        for import in imports {
-            if !import.is_external(file_lang) {
+        for import in tilth_core::extract_imports(&content, file_lang) {
+            if !tilth_core::imports::is_external(&import.source, file_lang) {
                 all_import_sources.push(import.source);
             }
         }

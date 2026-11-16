@@ -10,9 +10,9 @@ use std::path::Path;
 use tilth_core::{
     analyze_deps, detect_file_type, detect_file_type_with_content, extract_import_source,
     extract_imports, find_callers_batch, get_outline_entries, is_external, is_import_line,
-    is_test_file, resolve_related_files_with_content, test_entries, BloomFilterCache, CallerMatch,
-    Dependent, DepsResult, FileType, Import, ImportKind, Lang, LocalDep, OutlineEntry, OutlineKind,
-    TestEntry, TestKind, TilthError, Walk, WalkConfig,
+    is_test_file, resolve_related_files_with_content, rust_mod_declarations, test_entries,
+    BloomFilterCache, CallerMatch, Dependent, DepsResult, FileType, Import, Lang, LocalDep,
+    ModDecl, OutlineEntry, OutlineKind, TestEntry, TestKind, TilthError, Walk, WalkConfig,
 };
 
 struct Sample {
@@ -213,34 +213,38 @@ fn rust_use_group_gives_one_import_per_member() {
     );
 }
 
-/// A bodiless `mod` imports the file that holds the module, and is never
-/// external; an inline `mod` imports nothing.
+/// A bodiless `mod` declares the file that holds its module, which the
+/// related files include; an inline `mod` declares none.
 #[test]
 fn rust_mod_declaration_is_a_local_import() {
     let rust = "mod engine;\n#[path = \"sys/unix.rs\"]\nmod sys;\nmod tests {}\n";
-    let imports: Vec<(String, ImportKind, bool)> = extract_imports(rust, Lang::Rust)
+    let decls: Vec<(String, Option<String>, u32)> = rust_mod_declarations(rust)
         .into_iter()
-        .map(|i| {
-            let external = i.is_external(Lang::Rust);
-            (i.source, i.kind, external)
-        })
+        .map(
+            |ModDecl {
+                 name,
+                 path_attr,
+                 line,
+                 ..
+             }| (name, path_attr, line),
+        )
         .collect();
     assert_eq!(
-        imports,
+        decls,
         [
-            (
-                "engine".to_string(),
-                ImportKind::ModFile { path: None },
-                false
-            ),
-            (
-                "sys".to_string(),
-                ImportKind::ModFile {
-                    path: Some("sys/unix.rs".to_string())
-                },
-                false
-            ),
+            ("engine".to_string(), None, 1),
+            ("sys".to_string(), Some("sys/unix.rs".to_string()), 3),
         ]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("sys")).unwrap();
+    fs::write(dir.path().join("engine.rs"), "").unwrap();
+    fs::write(dir.path().join("sys/unix.rs"), "").unwrap();
+    let related = resolve_related_files_with_content(&dir.path().join("main.rs"), rust);
+    assert_eq!(
+        related,
+        [dir.path().join("engine.rs"), dir.path().join("sys/unix.rs")]
     );
 }
 
