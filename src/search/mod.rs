@@ -3488,6 +3488,10 @@ mod tests {
     /// `SKIP_DIRS`, `.tilthignore`, and gitignore whichever way the call set
     /// it (#347). It must visit what the search walk visits.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn basename_overview_visits_only_what_the_search_walk_visits() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

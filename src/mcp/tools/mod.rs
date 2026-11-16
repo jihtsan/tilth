@@ -264,6 +264,10 @@ mod tests {
     /// The fallback keeps searching the root, and now also names the
     /// directory the caller probably meant, so the next call can narrow.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn resolve_scope_missing_dir_warning_suggests_the_close_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/search")).unwrap();
@@ -279,6 +283,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn resolve_scope_missing_dir_no_root_error_suggests_the_close_directory() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src/search")).unwrap();

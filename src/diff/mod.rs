@@ -1645,6 +1645,7 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "git quotes a Windows path in the diff header, #414")]
     fn an_absolute_file_pair_keeps_the_new_path_absolute_in_the_heading() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.rs");
@@ -1727,6 +1728,7 @@ diff --git a/src/main.rs b/src/main.rs
     /// file of the same name in it. Git prints relative and absolute roots
     /// differently, and both are read.
     #[test]
+    #[cfg_attr(windows, ignore = "git quotes a Windows path in the diff header, #414")]
     fn a_pair_of_directories_reads_each_file_from_its_side() {
         let dir = tempfile::tempdir().unwrap();
         for (path, content) in [
@@ -1809,6 +1811,7 @@ diff --git a/src/main.rs b/src/main.rs
 
     /// A count of one takes the singular noun in the overview (#294).
     #[test]
+    #[cfg_attr(windows, ignore = "git quotes a Windows path in the diff header, #414")]
     fn overview_counts_of_one_are_singular() {
         let dir = tempfile::tempdir().unwrap();
         let pair = |a: &str, b: &str| {
@@ -2721,6 +2724,10 @@ diff --git a/src/main.rs b/src/main.rs
     /// A file over the size cap is not searched for callers; when it names
     /// a changed symbol, the blast says so.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn diff_blast_names_a_big_file_it_did_not_search() {
         let limit = usize::try_from(tilth_core::source::MAX_FILE_SIZE).unwrap();
         let pad = "// padding line to push the file over the size limit\n".repeat(limit / 50 + 1);

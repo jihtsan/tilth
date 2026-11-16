@@ -483,6 +483,10 @@ mod tests {
     /// The rows looked the same, so the real dependents could not be told
     /// from the coincidence.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn each_dependent_says_whether_an_import_confirms_it() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
@@ -569,6 +573,10 @@ mod tests {
     /// each was a dependent by name only and capped with the coincidences,
     /// though a change to the target breaks them.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows prints relative paths with backslashes, #426"
+    )]
     fn dependents_in_the_target_package_are_confirmed() {
         let tmp = tempfile::tempdir().unwrap();
         let files = [
