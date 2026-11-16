@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::format::noun;
 use crate::session::Session;
+use crate::timeout::TimeLimit;
 use tilth_core::index::bloom::BloomFilterCache;
 use tilth_core::search::walk::WalkConfig;
 use tilth_core::shown;
@@ -270,6 +271,7 @@ pub(in crate::mcp) fn tool_write(
     bloom: &Arc<BloomFilterCache>,
     walk: WalkConfig,
     server_root: Option<&Path>,
+    limit: &TimeLimit,
 ) -> Result<String, String> {
     let files_val = args
         .get("files")
@@ -526,7 +528,7 @@ pub(in crate::mcp) fn tool_write(
                 session.record_read(path);
             }
         }
-        match crate::edit::apply_batch(hash_tasks, bloom, walk, show_diff, scope) {
+        match crate::edit::apply_batch(hash_tasks, bloom, walk, show_diff, scope, limit) {
             Ok(batch) => {
                 output.push_str(&batch.output);
                 // Cross-worktree warning for the hash-mode relative paths whose
@@ -568,6 +570,14 @@ pub(in crate::mcp) fn tool_write(
 )]
 mod tests {
     use super::*;
+
+    /// A time limit no blast walk in these tests comes near.
+    fn no_limit() -> TimeLimit {
+        TimeLimit::starting_now(
+            Arc::new(crate::timeout::ThreadTracker::new()),
+            std::time::Duration::from_secs(3600),
+        )
+    }
 
     fn fresh_bloom() -> Arc<BloomFilterCache> {
         Arc::new(BloomFilterCache::new())
@@ -615,6 +625,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(out.contains("created"), "expected 'created' verb: {out}");
@@ -636,6 +647,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -664,6 +676,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -687,6 +700,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(out.contains("append"), "expected 'append' summary: {out}");
@@ -711,6 +725,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect_err("duplicate paths must be rejected");
         assert!(err.contains("duplicate file path"), "unexpected err: {err}");
@@ -732,6 +747,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -761,6 +777,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -789,6 +806,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -818,6 +836,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -848,6 +867,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             Some(server_root.path()),
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -868,6 +888,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "probe\n");
@@ -890,6 +911,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -913,6 +935,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         // 3 pre-existing lines → the appended line is numbered 4, and only it is
@@ -941,6 +964,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap()
     }
@@ -1056,6 +1080,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect("create succeeds");
         let expected = root_path.join("relative/file.txt");
@@ -1094,6 +1119,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect("create succeeds");
         assert!(
@@ -1134,6 +1160,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect("create succeeds");
         let abs_path = p.canonicalize().unwrap();
@@ -1160,6 +1187,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect_err("relative root must be rejected");
         assert!(
@@ -1197,6 +1225,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             Some(dir_a.path()),
+            &no_limit(),
         )
         .expect("root-only write (no scope) must succeed into root, not refuse");
         assert!(
@@ -1234,6 +1263,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             Some(server_root.path()),
+            &no_limit(),
         )
         .unwrap();
         assert!(out.contains("created"), "{out}");
@@ -1253,6 +1283,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .unwrap();
         assert!(
@@ -1368,6 +1399,7 @@ mod tests {
             &fresh_bloom(),
             WalkConfig::default(),
             None,
+            &no_limit(),
         )
         .expect("hash edit succeeds");
 

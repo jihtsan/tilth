@@ -8,6 +8,8 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 
 use crate::format;
+use crate::search::blast::BlastQuery;
+use crate::timeout::TimeLimit;
 use crate::util::WriteOutcome;
 use tilth_core::error::TilthError;
 use tilth_core::index::bloom::BloomFilterCache;
@@ -16,13 +18,13 @@ use tilth_core::shown;
 
 /// One write guard per file, keyed by [`normalize_path_key`].
 ///
-/// [`detect_duplicate_paths`] only sees one batch, so it cannot stop a second
-/// `apply_batch` call — a tool call that outlived its timeout, or a second MCP
-/// session — from landing on a file mid-edit. Both would verify against the
-/// same snapshot and both would rename, dropping one edit while telling both
-/// callers "Applied". Holding this guard across the read → verify → write pass
-/// makes the loser read the winner's output and either apply cleanly on top or
-/// report a hash mismatch.
+/// [`detect_duplicate_paths`] only sees one batch, so it cannot stop a
+/// second, concurrent `apply_batch` call from landing on a file mid-edit.
+/// Both would verify against the same snapshot and both would rename,
+/// dropping one edit while telling both callers "Applied". Holding this
+/// guard across the read → verify → write pass makes the loser read the
+/// winner's output and either apply cleanly on top or report a hash
+/// mismatch.
 ///
 /// Guards are per process. Two tilth processes editing one file still race,
 /// which is why the write itself re-checks the file's content immediately
@@ -496,27 +498,43 @@ pub struct BatchApplied {
 ///
 /// The blast radius of an edit lists the callers in the file's package.
 /// For a file outside any package they are searched under `scope`, the
-/// call's scope or root.
+/// call's scope or root. Every edit is applied before any caller is
+/// searched, and only that search is bounded by `limit`: an edit that has
+/// landed is always reported, and a search that runs out of time says its
+/// callers were not checked.
 pub fn apply_batch(
     tasks: Vec<FileEditTask>,
     bloom: &Arc<BloomFilterCache>,
     walk: WalkConfig,
     show_diff: bool,
     scope: &Path,
+    limit: &TimeLimit,
 ) -> Result<BatchApplied, String> {
     if let Some(msg) = detect_duplicate_paths(&tasks) {
         return Err(msg);
     }
 
-    let bloom: &BloomFilterCache = bloom;
-    let outcomes: Vec<(String, Option<PathBuf>)> = tasks
+    let (outcomes, queries): (Vec<Result<AppliedFile, String>>, Vec<Option<BlastQuery>>) = tasks
         .into_par_iter()
-        .map(|task| apply_one(task, bloom, walk, show_diff, scope))
-        .collect();
+        .map(|task| match apply_one(task, show_diff, scope) {
+            Ok((file, query)) => (Ok(file), query),
+            Err(section) => (Err(section), None),
+        })
+        .unzip();
+    let blasts = crate::search::blast::blast_within(queries, bloom, walk, limit);
 
-    let (sections, applied): (Vec<String>, Vec<Option<PathBuf>>) = outcomes.into_iter().unzip();
+    let mut sections = Vec::with_capacity(outcomes.len());
+    let mut applied = Vec::new();
+    for (outcome, blast) in outcomes.into_iter().zip(blasts) {
+        match outcome {
+            Ok(file) => {
+                sections.push(file.section(blast.as_deref()));
+                applied.push(file.path);
+            }
+            Err(section) => sections.push(section),
+        }
+    }
     let output = sections.join("\n\n---\n\n");
-    let applied: Vec<PathBuf> = applied.into_iter().flatten().collect();
 
     if applied.is_empty() {
         Err(output)
@@ -525,47 +543,57 @@ pub fn apply_batch(
     }
 }
 
-/// Process one task into its section and, when its edits applied, its path.
-/// Kept separate so the parallel closure stays trivial and per-file logic is
-/// testable in isolation.
-fn apply_one(
-    task: FileEditTask,
-    bloom: &BloomFilterCache,
-    walk: WalkConfig,
-    show_diff: bool,
-    scope: &Path,
-) -> (String, Option<PathBuf>) {
-    let (path, edits) = match task {
-        FileEditTask::ParseError { label, msg } => {
-            return (format!("## {label}\nerror: {msg}"), None);
+/// A file whose edits applied, before its callers are searched.
+struct AppliedFile {
+    path: PathBuf,
+    /// The diff, context and parse blocks.
+    body: String,
+}
+
+impl AppliedFile {
+    /// The file's `## <path>` section, ending in its blast radius.
+    fn section(&self, blast: Option<&str>) -> String {
+        // Echo the resolved absolute path in the success header so a write
+        // that landed in a different worktree than the agent intended is
+        // visible.
+        let abs = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        let body = format!("{}{}", self.body, blast.unwrap_or_default());
+        if body.is_empty() {
+            format!("## {}", shown::path(&abs))
+        } else {
+            format!("## {}\n{body}", shown::path(&abs))
         }
-        FileEditTask::Ready { path, edits } => (path, edits),
-    };
-    match render_applied(&path, &edits, bloom, walk, show_diff, scope) {
-        // Echo the resolved absolute path in the success header so a write that
-        // landed in a different worktree than the agent intended is visible.
-        Ok(body) => {
-            let abs = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            let header = format!("## {}", shown::path(&abs));
-            let section = if body.is_empty() {
-                header
-            } else {
-                format!("{header}\n{body}")
-            };
-            (section, Some(path))
-        }
-        Err(msg) => (format!("## {}\n{msg}", shown::path(&path)), None),
     }
 }
 
-fn render_applied(
-    path: &Path,
-    edits: &[Edit],
-    bloom: &BloomFilterCache,
-    walk: WalkConfig,
+/// Apply one task's edits, with what its blast radius looks for if they
+/// touched a definition. A file that failed comes back as its finished
+/// section.
+fn apply_one(
+    task: FileEditTask,
     show_diff: bool,
     scope: &Path,
-) -> Result<String, String> {
+) -> Result<(AppliedFile, Option<BlastQuery>), String> {
+    let (path, edits) = match task {
+        FileEditTask::ParseError { label, msg } => {
+            return Err(format!("## {}\nerror: {msg}", shown::path(&label)));
+        }
+        FileEditTask::Ready { path, edits } => (path, edits),
+    };
+    match render_applied(&path, &edits, show_diff) {
+        Ok(body) => {
+            let abs_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            // Callers are searched in the file's package, or in the call's
+            // scope for a file outside any package.
+            let scope = tilth_core::lang::package_root(&abs_path).unwrap_or(scope);
+            let query = crate::search::blast::blast_query(&path, &edits, scope);
+            Ok((AppliedFile { path, body }, query))
+        }
+        Err(msg) => Err(format!("## {}\n{msg}", shown::path(&path))),
+    }
+}
+
+fn render_applied(path: &Path, edits: &[Edit], show_diff: bool) -> Result<String, String> {
     match apply_edits(path, edits).map_err(|e| e.to_string())? {
         EditResult::Applied {
             diff,
@@ -587,14 +615,6 @@ fn render_applied(
                     output.push_str("\n\n");
                 }
                 output.push_str(&parse);
-            }
-            let abs_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-            // Callers are searched in the file's package, or in the call's
-            // scope for a file outside any package.
-            let scope = tilth_core::lang::package_root(&abs_path).unwrap_or(scope);
-            if let Some(blast) = crate::search::blast::blast_radius(path, edits, scope, bloom, walk)
-            {
-                output.push_str(&blast);
             }
             Ok(output)
         }
@@ -980,6 +1000,14 @@ mod tests {
         FileEditTask::Ready { path, edits }
     }
 
+    /// A time limit no blast walk in these tests comes near.
+    fn no_limit() -> TimeLimit {
+        TimeLimit::starting_now(
+            Arc::new(crate::timeout::ThreadTracker::new()),
+            std::time::Duration::from_secs(3600),
+        )
+    }
+
     fn fresh_bloom() -> Arc<BloomFilterCache> {
         Arc::new(BloomFilterCache::new())
     }
@@ -1023,6 +1051,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("batch should succeed")
         .output;
@@ -1074,6 +1103,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("good half succeeded");
         assert_eq!(
@@ -1113,6 +1143,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect_err("batch with no successes returns Err");
         assert!(err.contains("hash mismatch"));
@@ -1148,6 +1179,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("good half kept the batch alive")
         .output;
@@ -1315,6 +1347,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect_err("duplicate paths must reject the batch");
         assert!(err.contains("duplicate file path"), "unexpected: {err}");
@@ -1364,12 +1397,26 @@ mod tests {
                 let a = s.spawn(|| {
                     let task = ready_task(path.clone(), one_edit(1, h1, "AAA"));
                     barrier.wait();
-                    apply_batch(vec![task], &bloom, WalkConfig::default(), false, dir.path())
+                    apply_batch(
+                        vec![task],
+                        &bloom,
+                        WalkConfig::default(),
+                        false,
+                        dir.path(),
+                        &no_limit(),
+                    )
                 });
                 let b = s.spawn(|| {
                     let task = ready_task(path.clone(), one_edit(5, h5, "EEE"));
                     barrier.wait();
-                    apply_batch(vec![task], &bloom, WalkConfig::default(), false, dir.path())
+                    apply_batch(
+                        vec![task],
+                        &bloom,
+                        WalkConfig::default(),
+                        false,
+                        dir.path(),
+                        &no_limit(),
+                    )
                 });
                 (a.join().unwrap(), b.join().unwrap())
             });
@@ -1427,6 +1474,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("edit applies")
         .output;
@@ -1467,6 +1515,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("the edit applies")
         .output;
@@ -1502,6 +1551,7 @@ mod tests {
             WalkConfig::default(),
             false,
             dir.path(),
+            &no_limit(),
         )
         .expect("edit applies")
         .output;

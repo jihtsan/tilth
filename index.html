@@ -559,9 +559,9 @@
       <h2 id="install-title">Install</h2>
       <p class="body">One binary with no runtime dependencies, from crates.io or npm. Prebuilt binaries are on the <a href="https://github.com/jahala/tilth/releases">releases page</a>.</p>
       <div class="term">
-<pre><span class="t-prompt">cargo</span> install tilth
+<pre><span class="t-prompt">cargo</span> install tilth --locked
 <span class="t-dim"># or</span>
-<span class="t-prompt">npx</span> tilth</pre>
+<span class="t-prompt">npm</span> install -g tilth</pre>
       </div>
       <p class="body note">Then <code>tilth install &lt;host&gt;</code> adds it to your agent host's MCP config, and <code>--edit</code> adds hash-anchored editing.</p>
       <p class="body note">It knows 23 hosts, among them claude-code, codex, gemini, cursor, vscode and zed, and the <a href="https://github.com/jahala/tilth#mcp-server">README</a> lists them all. Any other MCP client runs <code>tilth --mcp</code>.</p>

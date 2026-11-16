@@ -1,9 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rayon::prelude::*;
 
 use crate::edit::Edit;
 use crate::format::{noun, rel};
+use crate::timeout::{SpawnFailure, TimeLimit};
+use tilth_core::index::bloom::BloomFilterCache;
 use tilth_core::lang::detect_file_type_with_content;
 use tilth_core::lang::outline::get_outline_entries;
 use tilth_core::search::callers::find_callers_batch;
@@ -59,18 +64,22 @@ fn collect_touched(
     }
 }
 
-/// Computes blast radius for a set of edits on `path`.
-///
-/// Returns a formatted string describing external callers of any definitions
-/// touched by the edits. Returns `None` if no definitions were touched or no
-/// external callers exist.
-pub(crate) fn blast_radius(
-    path: &Path,
-    edits: &[Edit],
-    scope: &Path,
-    bloom: &tilth_core::index::bloom::BloomFilterCache,
-    walk: WalkConfig,
-) -> Option<String> {
+/// What the blast radius of an edit looks for: the definitions it touched,
+/// and where their callers are searched.
+pub(crate) struct BlastQuery {
+    touched: Vec<TouchedSymbol>,
+    /// The edited file, canonical. Its own calls are no part of its blast
+    /// radius.
+    file: PathBuf,
+    /// Where callers are searched, canonical.
+    scope: PathBuf,
+}
+
+/// The blast radius query for `edits` on `path`, with callers searched
+/// under `scope`. `None` when the edits touched no definition, so there is
+/// nothing to walk for. This reads and outlines the one file; the walk
+/// over `scope` is [`BlastQuery::walk`].
+pub(crate) fn blast_query(path: &Path, edits: &[Edit], scope: &Path) -> Option<BlastQuery> {
     let content = tilth_core::source::read_source(path).ok().flatten()?;
 
     let FileType::Code(lang) = detect_file_type_with_content(path, &content) else {
@@ -82,72 +91,137 @@ pub(crate) fn blast_radius(
     if touched.is_empty() {
         return None;
     }
-
-    let symbol_names: HashSet<String> = touched.iter().map(|t| t.name.clone()).collect();
-
-    // Calls from the edited file itself are not part of its blast radius.
-    // The walk counts every call site toward its bound, so the bound is
-    // raised by the file's own calls: it then stops after `BLAST_STOP_AFTER`
-    // sites of other files, wherever in the walk the edited file comes.
     // The scope is canonical too, so the walk names the edited file as
-    // `canonical` even through a symlinked scope (`/tmp` on macOS).
-    let canonical = path.canonicalize().ok()?;
-    let scope = &scope.canonicalize().ok()?;
-    let own_calls: usize = find_callers_batch(
-        &symbol_names,
-        Walk::new(&canonical, walk),
-        bloom,
-        None,
-        |s| s.len(),
-    )
-    .ok()?
-    .per_file
-    .iter()
-    .sum();
-    let walked = find_callers_batch(
-        &symbol_names,
-        Walk::new(scope, walk),
-        bloom,
-        Some(BLAST_STOP_AFTER + own_calls),
-        |sites| {
-            let mut file = FileCallers::default();
-            for (symbol, m) in sites {
-                if m.path == canonical {
-                    continue;
-                }
-                if is_test_file(&m.path) {
-                    file.test_path.get_or_insert_with(|| m.path.clone());
-                    file.tests += 1;
-                    continue;
-                }
-                let entry = file.by_symbol.entry(symbol).or_default();
-                entry.total += 1;
-                if entry.first.len() < PROD_CALLERS_LISTED {
-                    entry.first.push((m.path, m.line, m.calling_function));
-                }
-            }
-            file
-        },
-    )
-    .ok()?;
-    let files = walked.per_file;
-    // The edited file was left out on purpose, not for its size.
-    let mut skipped_large = walked.skipped_large;
-    skipped_large.retain(|p| *p != canonical);
+    // `file` even through a symlinked scope (`/tmp` on macOS).
+    Some(BlastQuery {
+        touched,
+        file: path.canonicalize().ok()?,
+        scope: scope.canonicalize().ok()?,
+    })
+}
 
-    if files.iter().all(|f| f.by_symbol.is_empty() && f.tests == 0) && skipped_large.is_empty() {
-        return None;
+impl BlastQuery {
+    /// The touched definitions as a phrase, for notes that name them.
+    fn names(&self) -> String {
+        crate::search::names_phrase(self.touched.iter().map(|t| t.name.as_str()))
     }
 
-    // A file skipped for size may hold callers the counts miss.
-    let mut out = format_blast_radius(&touched, &files, walked.reached_bound, scope);
-    let held = crate::search::names_phrase(symbol_names.iter().map(String::as_str));
-    if let Some(sentence) = crate::search::skipped_files_note(&skipped_large, &held, scope) {
-        out.push_str("> ");
-        out.push_str(&sentence);
-        out.push('\n');
+    /// Walks the scope for callers of the touched definitions. Returns the
+    /// formatted blast radius, or `None` when no other file calls them.
+    pub(crate) fn walk(&self, bloom: &BloomFilterCache, walk: WalkConfig) -> Option<String> {
+        let symbol_names: HashSet<String> = self.touched.iter().map(|t| t.name.clone()).collect();
+        let canonical = &self.file;
+        let scope = &self.scope;
+
+        // Calls from the edited file itself are not part of its blast radius.
+        // The walk counts every call site toward its bound, so the bound is
+        // raised by the file's own calls: it then stops after
+        // `BLAST_STOP_AFTER` sites of other files, wherever in the walk the
+        // edited file comes.
+        let own_calls: usize = find_callers_batch(
+            &symbol_names,
+            Walk::new(canonical, walk),
+            bloom,
+            None,
+            |s| s.len(),
+        )
+        .ok()?
+        .per_file
+        .iter()
+        .sum();
+        let walked = find_callers_batch(
+            &symbol_names,
+            Walk::new(scope, walk),
+            bloom,
+            Some(BLAST_STOP_AFTER + own_calls),
+            |sites| {
+                let mut file = FileCallers::default();
+                for (symbol, m) in sites {
+                    if m.path == *canonical {
+                        continue;
+                    }
+                    if is_test_file(&m.path) {
+                        file.test_path.get_or_insert_with(|| m.path.clone());
+                        file.tests += 1;
+                        continue;
+                    }
+                    let entry = file.by_symbol.entry(symbol).or_default();
+                    entry.total += 1;
+                    if entry.first.len() < PROD_CALLERS_LISTED {
+                        entry.first.push((m.path, m.line, m.calling_function));
+                    }
+                }
+                file
+            },
+        )
+        .ok()?;
+        let files = walked.per_file;
+        // The edited file was left out on purpose, not for its size.
+        let mut skipped_large = walked.skipped_large;
+        skipped_large.retain(|p| p != canonical);
+
+        if files.iter().all(|f| f.by_symbol.is_empty() && f.tests == 0) && skipped_large.is_empty()
+        {
+            return None;
+        }
+
+        // A file skipped for size may hold callers the counts miss.
+        let mut out = format_blast_radius(&self.touched, &files, walked.reached_bound, scope);
+        if let Some(sentence) =
+            crate::search::skipped_files_note(&skipped_large, &self.names(), scope)
+        {
+            out.push_str("> ");
+            out.push_str(&sentence);
+            out.push('\n');
+        }
+        Some(out)
     }
-    Some(out)
+
+    /// The blast radius section of a write whose walk did not finish.
+    fn not_checked(&self, why: &str) -> String {
+        format!(
+            "\n── blast radius ──\ncallers of {} not checked: {why}\n",
+            self.names()
+        )
+    }
+}
+
+/// The blast radius of each query, in order, walked together within
+/// `limit`. A query of `None` has none. A walk that runs out of time is
+/// left behind, and every query says its callers were not checked: the
+/// writes those queries come from have landed and must be reported now.
+pub(crate) fn blast_within(
+    queries: Vec<Option<BlastQuery>>,
+    bloom: &Arc<BloomFilterCache>,
+    walk: WalkConfig,
+    limit: &TimeLimit,
+) -> Vec<Option<String>> {
+    if queries.iter().all(Option::is_none) {
+        return vec![None; queries.len()];
+    }
+    let queries = Arc::new(queries);
+    let walked = {
+        let queries = Arc::clone(&queries);
+        let bloom = Arc::clone(bloom);
+        limit.run(move || {
+            queries
+                .par_iter()
+                .map(|q| q.as_ref().and_then(|q| q.walk(&bloom, walk)))
+                .collect::<Vec<_>>()
+        })
+    };
+    let why = match walked {
+        Ok(blasts) => return blasts,
+        Err(SpawnFailure::Timeout) => format!(
+            "the search ran past the {}s time limit (TILTH_TIMEOUT)",
+            limit.limit().as_secs()
+        ),
+        Err(SpawnFailure::Panic) => "the search failed".to_string(),
+    };
+    queries
+        .iter()
+        .map(|q| q.as_ref().map(|q| q.not_checked(&why)))
+        .collect()
 }
 
 /// Call sites after which a blast walk stops. Blast runs on every write
@@ -277,6 +351,17 @@ fn format_blast_radius(
 mod tests {
     use super::*;
     use tilth_core::types::OutlineKind;
+
+    /// The blast radius of `edits` on `path`, walked with no time limit.
+    fn blast_radius(
+        path: &Path,
+        edits: &[Edit],
+        scope: &Path,
+        bloom: &BloomFilterCache,
+        walk: WalkConfig,
+    ) -> Option<String> {
+        blast_query(path, edits, scope)?.walk(bloom, walk)
+    }
 
     fn make_edit(start: usize, end: usize) -> Edit {
         Edit {
