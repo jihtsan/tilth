@@ -25,7 +25,7 @@ jobs:
       # The panic-probe feature adds code only, so linting with it on covers
       # the build without it too.
       - run: cargo clippy --locked --workspace --all-targets --features tilth/panic-probe -- -D warnings
-      - run: cargo test --locked --workspace
+      # The test suite runs in test.yml, on Linux, macOS and Windows.
       # tilth-core must package on its own: tilth depends on it by version, so
       # a release publishes it to crates.io first.
       - run: cargo publish --dry-run --locked -p tilth-core

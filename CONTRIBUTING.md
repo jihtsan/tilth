@@ -18,7 +18,7 @@ Thanks for your interest. tilth is small and intentionally so — clean, focused
    ```
 3. Open a PR. Describe what changed and how to test it.
 
-CI runs the same three checks on every push, plus a publish dry-run of `tilth-core` and `tests/mcp_panic.rs` in the release profile (`cargo test --release --features panic-probe --test mcp_panic`).
+CI runs the same three checks on every push, the tests on Linux, macOS and Windows, plus a publish dry-run of `tilth-core` and `tests/mcp_panic.rs` in the release profile (`cargo test --release --features panic-probe --test mcp_panic`).
 
 ## What helps
 

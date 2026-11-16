@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A change to the pipeline itself builds and smoke-checks every target on
+  # the pull request. The jobs that publish run on a tag only.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/check/release_smoke.py
+      - scripts/check/release_smoke/**
 
 permissions:
   contents: read
@@ -12,16 +19,25 @@ env:
 
 jobs:
   # Fail fast if any version in the release disagrees with the tag. tilth and
-  # tilth-core move in lockstep: the crate versions and the version tilth
-  # requires of tilth-core all equal the tag.
+  # tilth-core move in lockstep: the crate versions equal the tag, and tilth
+  # requires exactly that version of tilth-core, because it reaches into the
+  # library's hidden modules. A pull request has no tag, so there the
+  # versions are checked against tilth's own.
   version-check:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
       - name: Verify versions match tag
+        id: versions
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
           CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="${GITHUB_REF#refs/tags/v}"
+          else
+            TAG="$CARGO_VER"
+          fi
           CORE_VER=$(grep '^version' crates/tilth-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           CORE_REQS=$(grep '^tilth-core = ' Cargo.toml | sed 's/.*version = "\([^"]*\)".*/\1/' | sort -u)
           NPM_VER=$(node -p "require('./npm/package.json').version")
@@ -34,19 +50,18 @@ jobs:
             echo "::error::crates/tilth-core/Cargo.toml version ($CORE_VER) does not match tag ($TAG)"
             exit 1
           fi
-          if [ "$CORE_REQS" != "$TAG" ]; then
-            echo "::error::Cargo.toml requires tilth-core $CORE_REQS, not the tag's version ($TAG)"
+          if [ "$CORE_REQS" != "=$TAG" ]; then
+            echo "::error::Cargo.toml requires tilth-core $CORE_REQS, not exactly the tag's version (=$TAG)"
             exit 1
           fi
           if [ "$NPM_VER" != "$TAG" ]; then
             echo "::error::npm/package.json version ($NPM_VER) does not match tag ($TAG)"
             exit 1
           fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
   build:
     needs: version-check
-    permissions:
-      contents: write # softprops/action-gh-release uploads release assets
     strategy:
       fail-fast: false
       matrix:
@@ -113,22 +128,85 @@ jobs:
           7z a ../../../tilth-${{ matrix.target }}.zip tilth.exe
           cd ../../..
 
-      # Upload to GitHub release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ratchet:actions/upload-artifact@v7
+        with:
+          name: tilth-${{ matrix.target }}
+          path: tilth-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  # Each packaged binary runs on its own platform before anything ships:
+  # its version, an MCP initialize and one search. A cross-built target
+  # gets a runner of its own architecture.
+  smoke:
+    needs: [version-check, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-26-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      VERSION: ${{ needs.version-check.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # ratchet:actions/download-artifact@v8
+        with:
+          name: tilth-${{ matrix.target }}
+
+      - name: Smoke check (unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar xzf tilth-${{ matrix.target }}.tar.gz
+          python3 scripts/check/release_smoke.py tilth "$VERSION"
+
+      - name: Smoke check (windows)
+        if: runner.os == 'Windows'
+        run: |
+          7z x tilth-${{ matrix.target }}.zip
+          python scripts/check/release_smoke.py tilth.exe "$VERSION"
+
+  # One upload of every archive, once all of them ran, so a failed smoke
+  # check leaves no partial release behind.
+  github-release:
+    needs: smoke
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # softprops/action-gh-release uploads release assets
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # ratchet:actions/download-artifact@v8
+        with:
+          pattern: tilth-*
+          merge-multiple: true
       - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # ratchet:softprops/action-gh-release@v3
         with:
           files: |
             tilth-*.tar.gz
             tilth-*.zip
-          # Notes on ONE leg only: when the release already exists, the action
-          # appends freshly generated notes to the current body, so every extra
-          # matrix leg adds another "What's Changed" copy (#189).
-          generate_release_notes: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
+          generate_release_notes: true
 
-  # After all builds, publish to crates.io. tilth depends on tilth-core by
-  # version, so the library goes first; cargo waits until the registry serves
-  # it before the binary's publish resolves the dependency.
+  # After the release assets, publish to crates.io. tilth depends on
+  # tilth-core by version, so the library goes first; cargo waits until the
+  # registry serves it before the binary's publish resolves the dependency.
   publish-crate:
-    needs: build
+    needs: github-release
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
@@ -142,9 +220,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # After all builds, publish to npm
+  # After the release assets, publish to npm. The npm package downloads its
+  # binary from them on install.
   publish-npm:
-    needs: build
+    needs: github-release
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     # Trusted publishing (OIDC): no NPM_TOKEN needed; provenance is automatic.
     permissions:
