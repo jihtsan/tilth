@@ -1,9 +1,10 @@
 //! A panic does not end the MCP server, checked on the built binary.
 //!
 //! The `panic-probe` feature, which only this test enables, makes the server
-//! panic on purpose in two places: the tool call `tilth_panic_probe`, and the
-//! start-up overview of a root named `tilth-panic-probe`. Each case checks
-//! that the server answers the call that panicked and then the next one.
+//! panic on purpose in two places: a tool call whose arguments hold
+//! `panic_probe`, and the start-up overview of a root named
+//! `tilth-panic-probe`. Each case checks that the server answers the call
+//! that panicked and then the next one.
 //! CI runs them in the release profile: it is the one that ships, and it
 //! sets its own panic strategy.
 
@@ -29,16 +30,17 @@ impl Run {
     }
 }
 
-/// Run `tilth --mcp` from `launch`, send it `messages`, and close its stdin.
-/// With `overview` false, the server skips the start-up overview.
+/// Run `tilth --mcp <flags>` from `launch`, send it `messages`, and close
+/// its stdin. With `overview` false, the server skips the start-up overview.
 #[expect(
     clippy::expect_used,
     reason = "by design: a test helper, where a panic is the test failure"
 )]
-fn serve(launch: &Path, overview: bool, messages: &[Value]) -> Run {
+fn serve(launch: &Path, flags: &[&str], overview: bool, messages: &[Value]) -> Run {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tilth"));
     command
         .arg("--mcp")
+        .args(flags)
         .current_dir(launch)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -91,21 +93,13 @@ fn with_source(dir: &Path) {
     std::fs::write(dir.join("lib.rs"), "fn probe_target_zq() {}\n").unwrap();
 }
 
-/// A tool that panics gets an error result, and the server answers the
-/// next call.
-#[test]
-fn a_tool_panic_is_an_error_result_and_the_next_call_is_answered() {
-    let dir = tempfile::tempdir().unwrap();
-    with_source(dir.path());
-    let run = serve(
-        dir.path(),
-        false,
-        &[
-            initialize(),
-            call(1, "tilth_panic_probe", &json!({})),
-            call(2, "tilth_search", &json!({ "query": "probe_target_zq" })),
-        ],
-    );
+fn search() -> Value {
+    json!({ "query": "probe_target_zq" })
+}
+
+/// Call 1 panicked and got the error result, and call 2, a [`search`], was
+/// answered.
+fn assert_survived(run: &Run) {
     assert_eq!(
         run.result(1),
         &json!({
@@ -113,11 +107,59 @@ fn a_tool_panic_is_an_error_result_and_the_next_call_is_answered() {
             "isError": true,
         })
     );
-    let next = run.result(2);
-    assert_eq!(next.get("isError"), None, "{next}");
-    let text = next["content"][0]["text"].as_str().unwrap();
+    assert_answered(run, 2);
+}
+
+/// Call `id`, a [`search`], was answered, and the server exited 0 when its
+/// stdin closed.
+fn assert_answered(run: &Run, id: u64) {
+    let result = run.result(id);
+    assert_eq!(result.get("isError"), None, "{result}");
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("lib.rs:1"), "{text}");
     assert!(run.status.success(), "the server ended with {}", run.status);
+}
+
+/// A tool call run on a worker thread, as all but writes are.
+#[test]
+fn a_tool_panic_is_an_error_result_and_the_next_call_is_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    with_source(dir.path());
+    let mut panicking = search();
+    panicking["panic_probe"] = json!(true);
+    let run = serve(
+        dir.path(),
+        &[],
+        false,
+        &[
+            initialize(),
+            call(1, "tilth_search", &panicking),
+            call(2, "tilth_search", &search()),
+        ],
+    );
+    assert_survived(&run);
+}
+
+/// A write, which runs on the server's own thread so it is never abandoned.
+#[test]
+fn a_write_panic_is_an_error_result_and_the_next_call_is_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    with_source(dir.path());
+    let write = json!({
+        "files": [{ "path": "new.txt", "mode": "overwrite", "content": "x\n" }],
+        "panic_probe": true,
+    });
+    let run = serve(
+        dir.path(),
+        &["--edit"],
+        false,
+        &[
+            initialize(),
+            call(1, "tilth_write", &write),
+            call(2, "tilth_search", &search()),
+        ],
+    );
+    assert_survived(&run);
 }
 
 /// An overview that panics is left out of the instructions, and the server
@@ -130,17 +172,13 @@ fn an_overview_panic_leaves_initialize_answered() {
     with_source(&root);
     let run = serve(
         &root,
+        &[],
         true,
-        &[
-            initialize(),
-            call(1, "tilth_search", &json!({ "query": "probe_target_zq" })),
-        ],
+        &[initialize(), call(1, "tilth_search", &search())],
     );
     assert_eq!(
         run.result(0)["instructions"],
         include_str!("../prompts/mcp-base.md")
     );
-    let text = run.result(1)["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("lib.rs:1"), "{text}");
-    assert!(run.status.success(), "the server ended with {}", run.status);
+    assert_answered(&run, 1);
 }

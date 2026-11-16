@@ -1093,10 +1093,6 @@ a stderr warning at 3 abandoned threads. The reason this design is
 necessary: aborting a thread mid-tree-sitter-parse is unsafe, so
 "forget about it" is the only correct option short of a full async
 rewrite.
-A worker that panics is caught on its own thread, and the call gets
-the error result "tool panicked during execution"; the server goes on.
-That needs panics to unwind, so the release profile keeps Rust's
-default, and `tests/mcp_panic.rs` checks it in that profile.
 
 A write cannot be forgotten that way: the abandoned worker would still
 land it after the caller was told it timed out, and a retry would write
@@ -1105,6 +1101,12 @@ limit (`timeout::TimeLimit`) bounds only the blast-radius walk, which
 runs on an abandonable worker with whatever time is left. What bounds
 the write itself is its input: at most 20 files, each read, verified,
 rewritten and parsed, with no walk of the tree.
+
+A call that panics is caught, on its worker or around the write on the
+main loop, and gets the error result "tool panicked during execution";
+the server goes on. That needs panics to unwind, so the release profile
+keeps Rust's default, and `tests/mcp_panic.rs` checks both paths and the
+start-up overview in that profile.
 
 **Tool definitions.** `tool_definitions(edit_mode)` returns the schemas
 emitted at `tools/list`. These are the canonical source for argument

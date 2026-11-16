@@ -75,10 +75,10 @@ name = "tilth"
 path = "src/main.rs"
 
 [features]
-# Panics on purpose where the MCP server must survive one: the tool call
-# tilth_panic_probe, and the start-up overview of a root named
-# tilth-panic-probe. Only tests/mcp_panic.rs enables it; a shipped build
-# has neither.
+# Panics on purpose where the MCP server must survive one: a tool call
+# whose arguments hold panic_probe, and the start-up overview of a root
+# named tilth-panic-probe. Only tests/mcp_panic.rs enables it; a shipped
+# build has neither.
 panic-probe = []
 
 [[test]]
