@@ -1,7 +1,8 @@
 //! Scala language spec.
 
 use crate::lang::spec::{
-    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS,
+    DEFAULT_DEF_KINDS,
 };
 
 const CALLEE_QUERY: &str = concat!(
@@ -14,6 +15,25 @@ const SIBLING_QUERY: &str = concat!(
     "(field_expression (identifier) @obj (identifier) @ref)\n",
     "(call_expression function: (field_expression (identifier) @obj (identifier) @ref))\n",
 );
+
+/// `${…}` in a processed string: `s"…"`, `f"…"`, `raw"…"`, or any other
+/// interpolator's.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"",
+    marked: Some(follows_an_interpolator),
+    holes: &[Hole {
+        opens: b"${",
+        closes: b'}',
+    }],
+};
+
+/// Whether `before` ends in a name, the interpolator a processed string
+/// opens with.
+fn follows_an_interpolator(before: &[u8]) -> bool {
+    before
+        .last()
+        .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii())
+}
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Scala",
@@ -32,6 +52,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
         letters: &['$'],
         marks: &[],
     },
+    interpolation: Some(INTERPOLATION),
     strip_family: Some(StripFamily::JavaKotlinCSharp),
     extract_receiver: None,
     callee_filter: None,

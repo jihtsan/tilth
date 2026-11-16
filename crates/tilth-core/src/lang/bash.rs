@@ -1,10 +1,30 @@
 //! Bash language spec.
 
 use crate::lang::spec::{
-    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS,
+    DEFAULT_DEF_KINDS,
 };
 
 const CALLEE_QUERY: &str = "(command name: (command_name) @callee)\n";
+
+/// The command substitutions, `$(…)` and `` `…` ``, in a double-quoted
+/// string. A backtick is one outside a string too. A parameter expansion's
+/// `${…}` is no hole: its operators (`${path%/*}`, `${name##*/}`) are not
+/// code, and a call in it stands in a command substitution of its own.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"",
+    marked: None,
+    holes: &[
+        Hole {
+            opens: b"$(",
+            closes: b')',
+        },
+        Hole {
+            opens: b"`",
+            closes: b'`',
+        },
+    ],
+};
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Bash",
@@ -23,6 +43,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
         letters: &['-'],
         marks: &[],
     },
+    interpolation: Some(INTERPOLATION),
     strip_family: Some(StripFamily::Bash),
     extract_receiver: None,
     callee_filter: None,

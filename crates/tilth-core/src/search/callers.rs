@@ -570,6 +570,101 @@ mod tests {
         }
     }
 
+    /// A string may hold code: a JavaScript template's `${…}`, Ruby's
+    /// `#{…}`, a Python f-string's `{…}`, a shell's `$(…)`. The bloom
+    /// pre-filter once skipped such a string whole, so a file whose only
+    /// mention of a name was a call in one was skipped before it was parsed
+    /// (#398).
+    #[test]
+    fn a_call_inside_an_interpolated_string_is_a_call_site() {
+        for (file, source, target, want) in [
+            (
+                "b.js",
+                "function main(x) {\n  return `n=${fmtx(x)}`;\n}\n",
+                "fmtx",
+                &[(2, "main")][..],
+            ),
+            (
+                "b.ts",
+                "function main(x: number) {\n  return `a ${`b`} ${ {k: 1}.k } ${fmtx(x)}`;\n}\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "b.tsx",
+                "function Main(x: number) {\n  return <p>{`n=${fmtx(x)}`}</p>;\n}\n",
+                "fmtx",
+                &[(2, "Main")],
+            ),
+            (
+                "b.rb",
+                "def main(x)\n  \"n=#{fmtx(x)}\"\nend\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "b.ex",
+                "defmodule B do\n  def main(x) do\n    \"n=#{fmtx(x)}\"\n  end\nend\n",
+                "fmtx",
+                &[(3, "B.main")],
+            ),
+            (
+                "B.kt",
+                "fun main(x: Int): String {\n    return \"n=${fmtx(x)}\"\n}\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "B.scala",
+                "object B {\n  def main(x: Int): String = s\"n=${fmtx(x)}\"\n}\n",
+                "fmtx",
+                &[(2, "B.main")],
+            ),
+            (
+                "b.swift",
+                "func main(x: Int) -> String {\n    return \"n=\\(fmtx(x))\"\n}\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "b.py",
+                "def main(x):\n    return f\"n={fmtx(x)}\"\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "B.cs",
+                "static class B {\n    static string Main(int x) { return $\"n={Fmtx(x)}\"; }\n}\n",
+                "Fmtx",
+                &[(2, "B.Main")],
+            ),
+            (
+                "b.sh",
+                "main() {\n  echo \"n=$(fmtx 1)\"\n}\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "b.sh",
+                "main() {\n  n=`fmtx 1`\n}\n",
+                "fmtx",
+                &[(2, "main")],
+            ),
+            (
+                "b.php",
+                "<?php\nfunction main($a) {\n  return \"n={$a->fmtx(1)}\";\n}\n",
+                "fmtx",
+                &[(3, "main")],
+            ),
+        ] {
+            assert_eq!(
+                caller_labels(file, source, target),
+                labels(want),
+                "{file}: {source:?}"
+            );
+        }
+    }
+
     /// Ruby calls a method without parentheses: `subtotal + tax`,
     /// `compute_tax subtotal`. The grammar reads such a call as a bare
     /// `identifier`, the same node as a local variable, so only Ruby's own
