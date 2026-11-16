@@ -80,7 +80,7 @@ fn initialize(roots: bool) -> Value {
 fn roots_answer(root: &Path) -> Value {
     json!({
         "jsonrpc": "2.0", "id": "tilth_roots_1",
-        "result": { "roots": [{ "uri": format!("file://{}", root.display()) }] },
+        "result": { "roots": [{ "uri": format!("file://{}", root.to_string_lossy()) }] },
     })
 }
 

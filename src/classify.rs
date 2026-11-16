@@ -368,7 +368,7 @@ mod tests {
         // An existing path whose last component looks like a flag stays a path.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("i")).unwrap();
-        let existing = format!("{}/i", tmp.path().display());
+        let existing = format!("{}/i", tmp.path().to_string_lossy());
         assert!(
             matches!(classify(&existing, &scope), QueryType::FilePath(_)),
             "an existing path must not become a regex"

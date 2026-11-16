@@ -93,7 +93,7 @@ impl Session {
     /// AND the recorded mtime matches `current_mtime`. After-edit re-grok
     /// falls back to a full re-inline.
     pub fn is_expanded(&self, path: &Path, line: u32, current_mtime: SystemTime) -> bool {
-        let key = format!("{}:{}", path.display(), line);
+        let key = format!("{}:{line}", path.to_string_lossy());
         self.expanded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -102,7 +102,7 @@ impl Session {
     }
 
     pub fn record_expand(&self, path: &Path, line: u32, mtime: SystemTime) {
-        let key = format!("{}:{}", path.display(), line);
+        let key = format!("{}:{line}", path.to_string_lossy());
         self.expanded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -118,7 +118,7 @@ impl Session {
     /// see "not expanded" and both inline the full body — the dedup pays for
     /// itself only when exactly one caller can win the claim.
     pub fn claim_expand(&self, path: &Path, line: u32, mtime: SystemTime) -> bool {
-        let key = format!("{}:{}", path.display(), line);
+        let key = format!("{}:{line}", path.to_string_lossy());
         let mut expanded = self
             .expanded
             .lock()

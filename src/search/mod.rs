@@ -24,6 +24,7 @@ use crate::types::{estimate_tokens, Match, SearchResult};
 use tilth_core::cache::OutlineCache;
 use tilth_core::error::TilthError;
 use tilth_core::search::walk::{Walk, WalkConfig};
+use tilth_core::shown;
 use tilth_core::types::FileType;
 
 use crate::format::rel;
@@ -1730,7 +1731,7 @@ fn format_glob_result(result: &glob::GlobResult, scope: &Path) -> Result<String,
     let header = format!(
         "# Glob: \"{}\" in {} — {} {}",
         result.pattern,
-        scope.display(),
+        shown::path(scope),
         result.files.len(),
         format::noun(result.files.len(), "file", "files")
     );

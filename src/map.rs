@@ -8,6 +8,7 @@ use crate::types::estimate_tokens;
 use tilth_core::cache::OutlineCache;
 use tilth_core::lang::{detect_file_type, detect_file_type_with_content};
 use tilth_core::search::walk::{base_walk_builder, WalkConfig};
+use tilth_core::shown;
 use tilth_core::types::FileType;
 
 /// Generate a structural codebase map.
@@ -92,7 +93,7 @@ pub fn generate(
         }
     }
 
-    let mut out = format!("# Map: {} (depth {})\n", scope.display(), depth);
+    let mut out = format!("# Map: {} (depth {})\n", shown::path(scope), depth);
     let totals = compute_dir_totals(&tree);
     format_tree(&tree, &totals, Path::new(""), 0, &mut out);
 
@@ -212,7 +213,12 @@ fn format_tree(
             if let Some(ref symbols) = f.symbols {
                 if symbols.is_empty() {
                     let tokens = noun(f.tokens, "token", "tokens");
-                    let _ = writeln!(out, "{prefix}{} (~{} {tokens})", f.name, f.tokens);
+                    let _ = writeln!(
+                        out,
+                        "{prefix}{} (~{} {tokens})",
+                        shown::path(&f.name),
+                        f.tokens
+                    );
                 } else {
                     let syms = symbols.join(", ");
                     let truncated = if syms.len() > 80 {
@@ -220,11 +226,16 @@ fn format_tree(
                     } else {
                         syms
                     };
-                    let _ = writeln!(out, "{prefix}{}: {truncated}", f.name);
+                    let _ = writeln!(out, "{prefix}{}: {truncated}", shown::path(&f.name));
                 }
             } else {
                 let tokens = noun(f.tokens, "token", "tokens");
-                let _ = writeln!(out, "{prefix}{} (~{} {tokens})", f.name, f.tokens);
+                let _ = writeln!(
+                    out,
+                    "{prefix}{} (~{} {tokens})",
+                    shown::path(&f.name),
+                    f.tokens
+                );
             }
         }
     }
@@ -235,7 +246,12 @@ fn format_tree(
         let dir_name = subdir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let total = totals.get(subdir).copied().unwrap_or(0);
         let tokens = noun(total, "token", "tokens");
-        let _ = writeln!(out, "{prefix}{dir_name}/ (~{} {tokens})", fmt_tokens(total));
+        let _ = writeln!(
+            out,
+            "{prefix}{}/ (~{} {tokens})",
+            shown::path(dir_name),
+            fmt_tokens(total)
+        );
         format_tree(tree, totals, subdir, indent + 1, out);
     }
 }

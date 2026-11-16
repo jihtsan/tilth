@@ -366,11 +366,7 @@ mod tests {
         };
         let cache = OutlineCache::with_budget(one * 5);
         for (i, path) in files.iter().enumerate() {
-            assert!(
-                cache.get_or_parse(path).is_some(),
-                "{} did not parse",
-                path.display()
-            );
+            assert!(cache.get_or_parse(path).is_some(), "{path:?} did not parse");
             let (_, bytes) = cache.held();
             assert!(
                 bytes <= cache.budget,

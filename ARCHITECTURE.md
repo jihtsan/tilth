@@ -54,6 +54,10 @@ crates/tilth-core/src/
 │                    read_source: reads a file's text for parsing or
 │                    search without its byte-order mark; MAX_FILE_SIZE,
 │                    the one size limit every parse and search walk shares
+├── shown.rs         shown::path, the one way a path becomes text: quotes
+│                    and escapes a name holding a control character, so
+│                    it cannot end its line and forge a result line.
+│                    The binary's renderers and TilthError share it
 │
 ├── search/          Cross-file queries
 │   ├── walk.rs          Walker and ignore policy (WalkConfig, SKIP_DIRS,
