@@ -34,7 +34,7 @@ const SIBLING_QUERY: &str = concat!(
 /// Raw tokens are all this can go on, so it neither over- nor under-matches
 /// perfectly: `matches!(x, Foo(_))` and `#[cfg(not(unix))]` still look like
 /// calls, and a turbofish (`m!(parse::<u32>(s))`) still looks like none.
-fn callee_is_call(node: &tree_sitter::Node, _source: &[u8]) -> bool {
+fn callee_is_call(node: &tree_sitter::Node, _content: &[u8]) -> bool {
     if node.parent().is_some_and(|p| p.kind() == "token_tree") {
         node.next_sibling()
             .is_some_and(|n| n.kind() == "token_tree")
