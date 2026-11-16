@@ -159,6 +159,7 @@ fn search_capped(
         definitions,
         code_definitions,
         usages: total - definitions,
+        usages_by_qualified_text: owner.is_some(),
         facet_totals,
         skipped_large,
         skipped_for: name.to_string(),

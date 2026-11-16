@@ -81,6 +81,11 @@ pub struct SearchResult {
     /// headings that name the query.
     pub code_definitions: usize,
     pub usages: usize,
+    /// The usages are the lines that spell a qualified symbol query's text
+    /// (`Engine::run`), so a call of its bare name through a receiver
+    /// (`e.run()`) is not among them. False for a bare query and for content
+    /// search, whose usages are every line that holds the query.
+    pub usages_by_qualified_text: bool,
     /// Pre-cap subfacet counts. Computed in `symbol::search` by faceting the
     /// merged set before truncation; used by the renderer to print
     /// `displayed/total` headings and the per-facet hidden-count tail line.

@@ -203,6 +203,7 @@ fn search_capped(
         definitions: 0,
         code_definitions: 0,
         usages: total,
+        usages_by_qualified_text: false,
         facet_totals: FacetTotals::default(),
         skipped_large: super::sorted(skipped_large),
         skipped_for: pattern.to_string(),
