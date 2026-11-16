@@ -318,7 +318,9 @@ fn handle_request(req: &JsonRpcRequest, services: &Services) -> JsonRpcResponse 
             // Without a root there is nothing to describe; `run` says why
             // once it knows no root is coming.
             let overview = match services.root() {
-                Some(root) if services.config().overview => crate::overview::fingerprint(root),
+                Some(root) if services.config().overview => {
+                    crate::overview::fingerprint(root, services.config().walk)
+                }
                 _ => String::new(),
             };
             let instructions = if edit_mode {

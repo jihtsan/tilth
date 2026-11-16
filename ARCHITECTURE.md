@@ -256,7 +256,7 @@ methods worth describing in detail:
   as a pre-flight gate naming the exact Bash commands and host tools to
   avoid, with concrete `<bad>→<good>` rewrites. When
   `Config::overview` is on (no `TILTH_NO_OVERVIEW`, no `--no-overview`),
-  `overview::fingerprint(root)` is prepended, for the server's root at
+  `overview::fingerprint(root, walk)` is prepended, for the server's root at
   that moment — a project summary built in <250ms (a stderr warning fires
   if it overruns).
 - `tools/list` — returns the tool schemas. `tools/call` is the workhorse
@@ -431,7 +431,7 @@ is one query per grammar and query text, a fixed set.
 `walker(walk)` builds an `ignore::WalkParallel` with tilth's opinionated
 defaults from a `Walk`: the scope, an optional glob, and the run's
 `WalkConfig`. `base_walk_builder(scope, config)` builds the same walker,
-without the glob, for the sequential map and list walks. `walk_builder(walk)`
+without the glob, for the sequential map, list and overview walks. `walk_builder(walk)`
 is the glob-narrowed builder `walker` runs; a search's basename "File
 overview" fallback walks it in order, six levels deep. `clippy.toml` forbids
 `ignore::WalkBuilder::new` and `ignore::Walk::new` outside `walk.rs`, so
@@ -1091,7 +1091,7 @@ strategic guidance every host gets at `initialize`. It lives in
 agents kept reaching for those despite earlier "DO NOT use
 Grep/Read/Glob" rules. Edit mode appends an `EDIT_MODE_EXTRA` block
 from `prompts/mcp-edit.md` with the `tilth_write` instructions.
-`overview::fingerprint(root)` is prepended unless `Config::overview` is
+`overview::fingerprint(root, walk)` is prepended unless `Config::overview` is
 off — a brief summary of language counts, manifests, hot files,
 and git context.
 
@@ -1143,8 +1143,11 @@ A handful of small files cut across every subsystem.
 Three modules sit outside the search/read flow but are still
 user-facing.
 
-- **`overview.rs`** — `fingerprint(root)` walks files (depth 2),
-  detects primary language, parses the project manifest (`Cargo.toml`,
+- **`overview.rs`** — `fingerprint(root, walk)` counts source files
+  with the shared walker, up to 10,000 walk entries (a count cut short
+  reads "N+ source files"), and takes the primary language from that
+  count. A second walk of the top two directory levels feeds the
+  `dirs`, `hot` and `tests` lines. It parses the project manifest (`Cargo.toml`,
   `package.json`, `go.mod`, `pyproject.toml`), reads `git` context
   (branch and uncommitted file count from one `git status`, with one
   200 ms deadline for the whole line, which is left out when git does
