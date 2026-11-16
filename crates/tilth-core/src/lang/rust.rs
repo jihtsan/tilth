@@ -106,6 +106,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: false,
     hash_comments: false,
     names: NameRule::PLAIN,
+    interpolation: None,
     strip_family: Some(StripFamily::Rust),
     extract_receiver: None,
     callee_filter: Some(callee_is_call),

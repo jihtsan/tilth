@@ -97,6 +97,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: false,
     hash_comments: false,
     names: NameRule::PLAIN,
+    interpolation: None,
     strip_family: Some(StripFamily::Go),
     extract_receiver: Some(extract_go_receiver_name),
     callee_filter: None,

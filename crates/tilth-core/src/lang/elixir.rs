@@ -6,7 +6,7 @@
 //! shape makes a function's head look like a call, which `callee_is_call`
 //! rejects.
 
-use crate::lang::spec::{DefinitionOps, LangSpec, NameRule, StdlibRule};
+use crate::lang::spec::{DefinitionOps, Hole, Interpolation, LangSpec, NameRule, StdlibRule};
 use crate::lang::treesitter::{
     elixir_arguments, elixir_extract_func_head_name, node_text_simple, NodeTextMode,
 };
@@ -84,6 +84,16 @@ fn is_function_head(call: tree_sitter::Node, source: &[u8]) -> bool {
         .is_some_and(|keyword| ELIXIR_FUNCTION_TARGETS.contains(&keyword))
 }
 
+/// `#{…}` in a string, a charlist and a heredoc.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"'",
+    marked: None,
+    holes: &[Hole {
+        opens: b"#{",
+        closes: b'}',
+    }],
+};
+
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Elixir",
     extensions: &["ex", "exs"],
@@ -101,6 +111,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
         letters: &[],
         marks: &['?', '!'],
     },
+    interpolation: Some(INTERPOLATION),
     strip_family: None,
     extract_receiver: None,
     callee_filter: Some(callee_is_call),

@@ -28,6 +28,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
         letters: &['$'],
         marks: &[],
     },
+    interpolation: None,
     strip_family: Some(StripFamily::JavaKotlinCSharp),
     extract_receiver: None,
     callee_filter: None,

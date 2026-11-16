@@ -936,7 +936,10 @@ expensive tree-sitter parse. Identifier extraction is a byte-level
 state machine — fast enough to run on every cache miss without needing
 a tree-sitter pass. It reads names by each language's `NameRule` in the
 spec table, the rule its grammar reads them by (Ruby's `save!`, Python's
-`größe`), so it never drops a name a parse would find.
+`größe`), so it never drops a name a parse would find. It skips
+strings and comments, but reads the code in a string's holes (a
+JavaScript template's `${…}`, Ruby's `#{…}`, a Python f-string's `{…}`)
+as code, by the language's `Interpolation` in the spec table.
 
 This is actively used in the relational-query paths (it's why
 `tilth_search kind:callers` doesn't take O(N files) tree-sitter parses

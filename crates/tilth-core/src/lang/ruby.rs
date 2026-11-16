@@ -3,7 +3,9 @@
 
 use tree_sitter::Node;
 
-use crate::lang::spec::{LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 /// Every identifier: `callee_is_call` decides which ones call a method.
 const CALLEE_QUERY: &str = "(identifier) @callee\n";
@@ -148,6 +150,16 @@ fn callee_is_call(node: &Node, source: &[u8]) -> bool {
     }
 }
 
+/// `#{…}` in a double-quoted string and in a backtick command.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"`",
+    marked: None,
+    holes: &[Hole {
+        opens: b"#{",
+        closes: b'}',
+    }],
+};
+
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Ruby",
     extensions: &["rb"],
@@ -165,6 +177,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
         letters: &[],
         marks: &['?', '!'],
     },
+    interpolation: Some(INTERPOLATION),
     strip_family: None,
     extract_receiver: None,
     callee_filter: Some(callee_is_call),
