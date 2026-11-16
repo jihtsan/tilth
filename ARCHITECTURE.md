@@ -657,9 +657,13 @@ machinery:
   (or its `#[path]` file), beside a crate root or `mod.rs` and under
   `x/` for any other `x.rs`, and `self::` and `super::` start from the
   same directories. `format_deps` (binary)
-  does the human output: it lists the first 15 dependents, or all of
-  them with `--full`, and says how many it left out, under a budget
-  too, and how many were found by a call alone. The external-dep stdlib
+  does the human output: each "Used by" section lists the dependents
+  an import confirms first, then those found by a call alone, and each
+  dependent's first row says which (`imports it`, `by name`). It lists
+  the first 15 of the first kind and 5 of the second, or all of them
+  with `--full`, and says how many it left out, under a budget too.
+  The header counts the dependents found by a call alone, and the note
+  that explains them stays with it under any budget. The external-dep stdlib
   heuristic (`is_stdlib`) is per-language; module-path validation
   (`is_valid_module_path`) avoids treating relative paths as packages.
 - **Blast** (`blast.rs`) — symbol-level blast radius, printed after

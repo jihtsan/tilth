@@ -123,7 +123,8 @@ See what a file uses and what uses it. This is worth a look before you rename or
 
 ```
 $ tilth recovery.go --deps
-# Deps: recovery.go — 5 local, 0 external, 3 dependents
+# Deps: recovery.go — 5 local, 1 external, 3 dependents, 3 of them by name only
+> By name only: the file calls a name the target defines, and no import of the target was found, so the call may reach another definition of the name.
 
 ## Uses (local)
 context.go                     Abort, AbortWithStatus, Error, Next
@@ -132,15 +133,20 @@ fs.go                          Open
 gin.go                         New
 routergroup.go                 handle
 
+## Uses (external)
+github.com/gin-gonic/gin/internal/bytesconv
+
 ## Used by
-benchmarks_test.go:22          BenchmarkRecoveryMiddleware → Recovery
+gin.go:239                     Default              → Recovery (by name)
+
+## Used by (tests)
+benchmarks_test.go:22          BenchmarkRecoveryMiddleware → Recovery (by name)
 benchmarks_test.go:36          BenchmarkManyHandlers → Recovery
-gin.go:239                     Default              → Recovery
-recovery_test.go:22            TestPanicClean       → RecoveryWithWriter
+recovery_test.go:22            TestPanicClean       → RecoveryWithWriter (by name)
 ...
 ```
 
-"Used by" lists the files that call the file's names, and the files that import it without a call (`imports it`), also through a re-exporting `index.ts` or `__init__.py` (`imports it through …`). It lists the first 15 dependents and counts the rest. `--full` lists them all. The header counts the dependents found by a call alone, with no import of the file (`3 dependents, 1 of them by name only`), since such a call may reach another function of the same name.
+"Used by" lists the files that call the file's names, and the files that import it without a call (`imports it`), also through a re-exporting `index.ts` or `__init__.py` (`imports it through …`). The dependents an import confirms come first, marked `imports it` on their first row. Then come the dependents found by a call alone, with no import of the file, marked `by name`, since such a call may reach another function of the same name. Go files in one package call each other without an import, so they are all `by name`. It lists the first 15 dependents that import the file and the first 5 found by name, and counts the rest. `--full` lists them all. The header counts the dependents found by name (`3 dependents, 1 of them by name only`), and the note under it stays under any budget.
 
 In MCP mode, use the `tilth_deps` tool.
 

@@ -5,77 +5,96 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::format::noun;
+use crate::format::{and_more, noun};
 use tilth_core::search::deps::{Dependent, DepsResult, LocalDep, MAX_EXPORTED_SYMBOLS};
 
-/// Dependents listed before the rest are summarised in a count, unless the
-/// caller asks for the full list.
+/// Dependents an import confirms listed before the rest are counted, unless
+/// the caller asks for the full list.
 const MAX_DEPENDENTS: usize = 15;
+
+/// Dependents found by name only listed before the rest are counted, unless
+/// the caller asks for the full list.
+const MAX_BY_NAME: usize = 5;
 
 /// Format a `DepsResult` as a compact, readable string.
 ///
-/// `full` lists every dependent; otherwise the first `MAX_DEPENDENTS` are
+/// Each "Used by" section lists the dependents an import confirms first,
+/// then those found by name only, and each dependent's first row says which
+/// it is. `full` lists every dependent; otherwise the first `MAX_DEPENDENTS`
+/// that import the target and the first `MAX_BY_NAME` found by name are
 /// listed and the rest counted.
 ///
 /// Budget truncation priority (when `budget` tokens is too tight):
 /// 1. Truncate "Used by" entries (keep header count)
 /// 2. Truncate "Uses (external)" to count only
 /// 3. Truncate "Uses (local)" symbol lists to file paths only
-/// 4. Never truncate the header line
+/// 4. Never truncate the header, nor the by-name note that explains its count
 ///
 /// Whenever dependents are left out, a line says how many.
 pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, full: bool) -> String {
     // The result's paths are canonical; shown relative to the same scope.
     let scope = &scope.canonicalize().unwrap_or_else(|_| scope.to_path_buf());
     let dep_count = result.used_by.len();
-    let listed = if full {
-        dep_count
-    } else {
-        dep_count.min(MAX_DEPENDENTS)
+    let (imported, by_name): (Vec<&Dependent>, Vec<&Dependent>) =
+        result.used_by.iter().partition(|d| is_imported(d));
+    let cap = |deps: &[&Dependent], max: usize| {
+        if full {
+            deps.len()
+        } else {
+            deps.len().min(max)
+        }
     };
-    let (prod_deps, test_deps): (Vec<_>, Vec<_>) =
-        result.used_by[..listed].iter().partition(|d| !d.is_test);
+    let imported_listed = &imported[..cap(&imported, MAX_DEPENDENTS)];
+    let by_name_listed = &by_name[..cap(&by_name, MAX_BY_NAME)];
+    let section = |is_test: bool| -> Vec<&Dependent> {
+        imported_listed
+            .iter()
+            .chain(by_name_listed)
+            .filter(|d| d.is_test == is_test)
+            .copied()
+            .collect()
+    };
+    let prod_deps = section(false);
+    let test_deps = section(true);
 
     // ── Build sections (full fidelity first) ─────────────────────────────────
 
-    // Header
+    // Header, with the note that explains its by-name count.
     let rel_target = result
         .target
         .strip_prefix(scope)
         .unwrap_or(&result.target)
         .display()
         .to_string();
-    // A dependent with no import of the target was found by a call to a
-    // name the target defines, which another definition may own.
-    let by_name = result
-        .used_by
-        .iter()
-        .filter(|d| d.import_lines.is_empty())
-        .count();
-    let by_name_count = if by_name > 0 {
-        format!(", {by_name} of them by name only")
-    } else {
-        String::new()
-    };
-    let header = format!(
-        "# Deps: {} — {} local, {} external, {} {}{by_name_count}",
+    let mut header = format!(
+        "# Deps: {} — {} local, {} external, {} {}",
         rel_target,
         result.uses_local.len(),
         result.uses_external.len(),
         dep_count,
         noun(dep_count, "dependent", "dependents"),
     );
-    let by_name_note = if by_name > 0 {
-        "> By name only: the file calls a name the target defines, and no import of the \
-         target was found, so the call may reach another definition of the name."
-    } else {
-        ""
-    };
+    if !by_name.is_empty() {
+        let _ = write!(
+            header,
+            ", {} of them by name only\n> By name only: the file calls a name the target \
+             defines, and no import of the target was found, so the call may reach another \
+             definition of the name.",
+            by_name.len()
+        );
+    }
 
     let uses_local_section = format_uses_local(&result.uses_local, scope, true);
     let uses_external_section = format_uses_external(&result.uses_external);
     let used_by_section = format_used_by(&prod_deps, scope, "## Used by");
     let used_by_tests_section = format_used_by(&test_deps, scope, "## Used by (tests)");
+    let unlisted = |imported_shown: usize, by_name_shown: usize| {
+        unlisted_dependents(
+            (imported.len(), imported_shown),
+            (by_name.len(), by_name_shown),
+        )
+    };
+    let prod_imported = prod_deps.iter().filter(|d| is_imported(d)).count();
 
     let unsearched = unsearched_note(result);
 
@@ -86,9 +105,8 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
         &uses_external_section,
         &used_by_section,
         &used_by_tests_section,
-        &unlisted_dependents(dep_count, listed),
+        &unlisted(imported_listed.len(), by_name_listed.len()),
         &unsearched,
-        by_name_note,
     ]);
     let full_tokens = crate::types::estimate_tokens(full_output.len() as u64) as usize;
 
@@ -101,10 +119,10 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
                 &header,
                 &uses_local_section,
                 &uses_external_section,
-                &prod_deps,
+                &used_by_section,
+                &unlisted(prod_imported, prod_deps.len() - prod_imported),
                 dep_count,
                 &unsearched,
-                scope,
                 b,
             )
         }
@@ -119,6 +137,13 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
 
     let token_est = crate::types::estimate_tokens(output.len() as u64);
     format!("{output}\n\n[~{token_est} tokens]")
+}
+
+/// Whether an import of the target confirms the dependent. One without was
+/// found by a call to a name the target defines, which another definition
+/// may own.
+fn is_imported(dependent: &Dependent) -> bool {
+    !dependent.import_lines.is_empty()
 }
 
 /// The note that names what the call-site search left out, or nothing when
@@ -136,8 +161,8 @@ fn unsearched_note(result: &DepsResult) -> String {
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    if left_out.len() > NAMED {
-        let _ = write!(named, " and {} more", left_out.len() - NAMED);
+    if let Some(more) = and_more(left_out.len(), NAMED) {
+        let _ = write!(named, " {more}");
     }
     format!(
         "> Callers searched for {MAX_EXPORTED_SYMBOLS} of {} names: first the ones other \
@@ -146,14 +171,17 @@ fn unsearched_note(result: &DepsResult) -> String {
     )
 }
 
-/// The line that counts dependents left out of the listing, or nothing when
-/// all `total` are listed.
-fn unlisted_dependents(total: usize, listed: usize) -> String {
-    match total.saturating_sub(listed) {
-        0 => String::new(),
-        n if listed == 0 => format!("... {n} {} not listed", noun(n, "dependent", "dependents")),
-        n => format!("... and {n} more {}", noun(n, "dependent", "dependents")),
-    }
+/// The lines that count the dependents left out of the listing, each as
+/// (total, listed): first those an import confirms, then those found by
+/// name only. Empty when all are listed.
+fn unlisted_dependents(imported: (usize, usize), by_name: (usize, usize)) -> String {
+    [(imported, "importing it"), (by_name, "by name only")]
+        .into_iter()
+        .filter_map(|((total, listed), how)| {
+            and_more(total, listed).map(|more| format!("... {more} {how}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -221,10 +249,19 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
             .map(|(caller, (line, syms))| (caller, line, syms))
             .collect();
         callers.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-        for (caller, line, syms) in &callers {
+        let how = if is_imported(dep) {
+            "imports it"
+        } else {
+            "by name"
+        };
+        // The file's first row says how it was found, and its other rows follow it.
+        for (i, (caller, line, syms)) in callers.iter().enumerate() {
             let loc = format!("{rel}:{line}");
             let joined = syms.join(", ");
             let _ = write!(out, "\n{loc:<30} {caller:<20} \u{2192} {joined}");
+            if i == 0 {
+                let _ = write!(out, " ({how})");
+            }
         }
         // A file that imports the target without calling it.
         if callers.is_empty() {
@@ -254,10 +291,10 @@ fn apply_budget_truncation(
     header: &str,
     uses_local_full: &str,
     uses_external_full: &str,
-    prod_deps: &[&Dependent],
+    prod_listed: &str,
+    prod_unlisted: &str,
     total_dependents: usize,
     unsearched: &str,
-    scope: &Path,
     budget: usize,
 ) -> String {
     // Local deps as paths only, without their symbol lists. Each line is
@@ -274,9 +311,10 @@ fn apply_budget_truncation(
             format!("## Uses (local)\n{}", local_lines.join("\n"))
         }
     };
-    let prod_listed = format_used_by(prod_deps, scope, "## Used by");
-    let prod_unlisted = unlisted_dependents(total_dependents, prod_deps.len());
-    let none_listed = unlisted_dependents(total_dependents, 0);
+    let none_listed = match total_dependents {
+        0 => String::new(),
+        n => format!("... {n} {} not listed", noun(n, "dependent", "dependents")),
+    };
 
     // Progressively degraded versions, richest first.
     let candidates: [Vec<&str>; 5] = [
@@ -285,8 +323,8 @@ fn apply_budget_truncation(
             header,
             uses_local_full,
             uses_external_full,
-            &prod_listed,
-            &prod_unlisted,
+            prod_listed,
+            prod_unlisted,
             unsearched,
         ],
         // Level 1: no used-by entries at all
@@ -414,6 +452,93 @@ mod tests {
         assert!(!all_imported.contains("By name only"), "{all_imported}");
     }
 
+    /// #379: `main.rs` reaches `foo.rs` through `mod foo;` and `bar.rs`
+    /// through `use`, while `unrelated.rs` calls its own `new` and `render`.
+    /// The rows looked the same, so the real dependents could not be told
+    /// from the coincidence.
+    #[test]
+    fn each_dependent_says_whether_an_import_confirms_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let files = [
+            ("main.rs", "mod foo;\nmod bar;\n\nfn main() {\n    foo::run_engine();\n    let w = foo::Widget::new();\n    w.render();\n}\n"),
+            ("foo.rs", "pub struct Widget;\n\nimpl Widget {\n    pub fn new() -> Self { Widget }\n    pub fn render(&self) {}\n}\n\npub fn run_engine() {}\n"),
+            ("bar.rs", "use crate::foo::Widget;\nuse super::foo;\n\npub fn build() -> Widget { foo::run_engine(); Widget::new() }\npub fn rebuild() { foo::run_engine(); }\n"),
+            // Sorts first by path, so only the rule puts it last.
+            ("a_unrelated.rs", "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } pub fn render(&self) {} }\npub fn go() { let o = Other::new(); o.render(); }\n"),
+        ];
+        for (name, text) in files {
+            std::fs::write(src.join(name), text).unwrap();
+        }
+        let out = crate::run_deps(
+            &src.join("foo.rs"),
+            tmp.path(),
+            None,
+            false,
+            tilth_core::search::walk::WalkConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            out.contains(
+                "## Used by\n\
+                 src/bar.rs:4                   build                \u{2192} new, run_engine (imports it)\n\
+                 src/bar.rs:5                   rebuild              \u{2192} run_engine\n\
+                 src/main.rs:5                  main                 \u{2192} new, render, run_engine (imports it)\n\
+                 src/a_unrelated.rs:3           go                   \u{2192} new, render (by name)\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// 2 dependents that import the target, then 8 found by name only.
+    fn mostly_by_name() -> DepsResult {
+        let mut result = twenty_dependents();
+        result.used_by.truncate(10);
+        for d in &mut result.used_by[..8] {
+            d.import_lines.clear();
+        }
+        result
+    }
+
+    /// On tilth's own `src/config.rs`, 42 of 46 rows were coincidental name
+    /// matches, and the 15 listed ones hid the 4 an import confirms.
+    #[test]
+    fn dependents_an_import_confirms_come_first_and_by_name_ones_are_capped() {
+        let out = format_deps(&mostly_by_name(), Path::new("/r"), None, false);
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("user")).collect();
+        assert_eq!(rows.len(), 7, "{out}");
+        assert!(rows[0].starts_with("user08.ts:2") && rows[0].ends_with("(imports it)"));
+        assert!(rows[1].starts_with("user09.ts:2") && rows[1].ends_with("(imports it)"));
+        for (row, n) in rows[2..].iter().zip(0..) {
+            assert!(row.starts_with(&format!("user{n:02}.ts:2")), "{out}");
+            assert!(row.ends_with("(by name)"), "{out}");
+        }
+        assert!(out.contains("\n... and 3 more by name only"), "{out}");
+        assert!(!out.contains("importing it"), "{out}");
+
+        let full = format_deps(&mostly_by_name(), Path::new("/r"), None, true);
+        assert_eq!(listed(&full), 10, "{full}");
+        assert!(!full.contains("more by name only"), "{full}");
+    }
+
+    /// The header kept the by-name count under a budget while the note that
+    /// explains it was cut first.
+    #[test]
+    fn the_by_name_note_stays_with_the_header_under_any_budget() {
+        let result = mostly_by_name();
+        for budget in [None, Some(60), Some(40), Some(1)] {
+            let out = format_deps(&result, Path::new("/r"), budget, false);
+            assert!(
+                out.starts_with(
+                    "# Deps: lib.ts — 0 local, 0 external, 10 dependents, 8 of them by name only\n\
+                     > By name only: "
+                ),
+                "{budget:?}: {out}"
+            );
+        }
+    }
+
     fn listed(out: &str) -> usize {
         out.lines().filter(|l| l.starts_with("user")).count()
     }
@@ -423,7 +548,7 @@ mod tests {
         let out = format_deps(&twenty_dependents(), Path::new("/r"), None, false);
         assert!(out.contains("20 dependents"), "{out}");
         assert_eq!(listed(&out), 15, "{out}");
-        assert!(out.contains("... and 5 more dependents"), "{out}");
+        assert!(out.contains("... and 5 more importing it"), "{out}");
     }
 
     /// `--full` used to change nothing: the cap sat in the analysis.
@@ -432,7 +557,7 @@ mod tests {
         let out = format_deps(&twenty_dependents(), Path::new("/r"), None, true);
         assert_eq!(listed(&out), 20, "{out}");
         assert!(out.contains("## Used by (tests)"), "{out}");
-        assert!(!out.contains("more dependents"), "{out}");
+        assert!(!out.contains("more importing it"), "{out}");
     }
 
     /// Under a budget the tests section went first with nothing said, and
@@ -445,7 +570,10 @@ mod tests {
 
         let no_tests = format_deps(&result, Path::new("/r"), Some(full_tokens - 20), true);
         assert_eq!(listed(&no_tests), 15, "{no_tests}");
-        assert!(no_tests.contains("... and 5 more dependents"), "{no_tests}");
+        assert!(
+            no_tests.contains("... and 5 more importing it"),
+            "{no_tests}"
+        );
 
         let none = format_deps(&result, Path::new("/r"), Some(30), true);
         assert_eq!(listed(&none), 0, "{none}");
