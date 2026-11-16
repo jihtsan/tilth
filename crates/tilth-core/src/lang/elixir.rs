@@ -4,7 +4,7 @@
 //! The definition detection + name extraction + weight live here and are wired
 //! into [`SPEC`] via its `definition_kinds` / `definitions` fields.
 
-use crate::lang::spec::{DefinitionOps, LangSpec, StdlibRule};
+use crate::lang::spec::{DefinitionOps, LangSpec, NameRule, StdlibRule};
 use crate::lang::treesitter::{
     elixir_arguments, elixir_extract_func_head_name, node_text_simple, NodeTextMode,
 };
@@ -48,6 +48,10 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: true,
     hash_comments: true,
+    names: NameRule {
+        letters: &[],
+        marks: &['?', '!'],
+    },
     strip_family: None,
     extract_receiver: None,
     callee_filter: None,

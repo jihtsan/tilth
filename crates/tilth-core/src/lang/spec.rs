@@ -50,6 +50,8 @@ pub struct LangSpec {
     /// Whether a `#` that starts a word opens a line comment
     /// (`Lang::has_hash_comments`).
     pub hash_comments: bool,
+    /// What a name is made of (`Lang::names`).
+    pub names: NameRule,
     /// Coarse comment-syntax family for cognitive-load stripping (`StripLang`).
     pub strip_family: Option<StripFamily>,
     /// Go-only: extract the method receiver name from file content.
@@ -94,6 +96,55 @@ impl StdlibRule {
             }
             Self::GoRoots(set) => set.contains(&source.split('/').next().unwrap_or(source)),
         }
+    }
+}
+
+/// What a language's names are made of, as its grammar reads them: letters,
+/// digits and `_` in every language (letters and digits of any script), and
+/// not starting with a digit. A language may add characters that count as
+/// letters (JavaScript's `$`, a shell function's `-`) and marks a name may
+/// end with (Ruby's and Elixir's `valid?` and `save!`).
+#[derive(Debug, Clone, Copy)]
+pub struct NameRule {
+    /// Characters that count as letters, anywhere in a name.
+    pub letters: &'static [char],
+    /// Characters one of which may end a name.
+    pub marks: &'static [char],
+}
+
+impl NameRule {
+    /// Letters, digits and `_` alone: the rule of most languages, and of a
+    /// file in no known language.
+    pub const PLAIN: Self = Self {
+        letters: &[],
+        marks: &[],
+    };
+
+    /// Whether `c` can start a name.
+    #[must_use]
+    pub fn starts(self, c: char) -> bool {
+        c.is_alphabetic() || c == '_' || self.letters.contains(&c)
+    }
+
+    /// Whether `c` can follow the first character of a name.
+    #[must_use]
+    pub fn continues(self, c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || self.letters.contains(&c)
+    }
+
+    /// Whether `c` can end a name after the characters [`Self::continues`]
+    /// accepts.
+    #[must_use]
+    pub fn ends(self, c: char) -> bool {
+        self.marks.contains(&c)
+    }
+
+    /// Whether `s` is one whole name.
+    #[must_use]
+    pub fn is_name(self, s: &str) -> bool {
+        let body = s.strip_suffix(|c| self.ends(c)).unwrap_or(s);
+        let mut chars = body.chars();
+        chars.next().is_some_and(|c| self.starts(c)) && chars.all(|c| self.continues(c))
     }
 }
 
@@ -307,6 +358,39 @@ mod tests {
                 "{lang:?} hash comment flag mismatch"
             );
         }
+    }
+
+    #[test]
+    fn name_rule_languages() {
+        for &lang in mod_all_langs_for_test() {
+            let names = spec(lang).names;
+            let letters: &[char] = match lang {
+                Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::Scala => {
+                    &['$']
+                }
+                Lang::Bash => &['-'],
+                _ => &[],
+            };
+            let marks: &[char] = match lang {
+                Lang::Ruby | Lang::Elixir => &['?', '!'],
+                _ => &[],
+            };
+            assert_eq!(
+                (names.letters, names.marks),
+                (letters, marks),
+                "{lang:?} name rule mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_is_whole_by_its_rule() {
+        let ruby = spec(Lang::Ruby).names;
+        assert!(ruby.is_name("save!") && ruby.is_name("valid?") && ruby.is_name("größe"));
+        assert!(!ruby.is_name("!") && !ruby.is_name("a!b") && !ruby.is_name("1st"));
+        assert!(!NameRule::PLAIN.is_name("save!") && !NameRule::PLAIN.is_name("$ref"));
+        assert!(spec(Lang::JavaScript).names.is_name("$ref"));
+        assert!(!NameRule::PLAIN.is_name(""));
     }
 
     #[test]

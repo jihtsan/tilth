@@ -1,6 +1,8 @@
 //! JavaScript language spec. Shares callee/sibling queries with TS/TSX.
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 /// Callee query shared by JavaScript, TypeScript, and TSX.
 pub(crate) const CALLEE_QUERY: &str = concat!(
@@ -11,6 +13,12 @@ pub(crate) const CALLEE_QUERY: &str = concat!(
 /// Sibling (`this.x`) query shared by JavaScript, TypeScript, and TSX.
 pub(crate) const SIBLING_QUERY: &str =
     "(member_expression object: (this) property: (property_identifier) @ref)\n";
+
+/// Name rule shared by JavaScript, TypeScript, and TSX: `$` is a letter.
+pub(crate) const NAMES: NameRule = NameRule {
+    letters: &['$'],
+    marks: &[],
+};
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "JavaScript",
@@ -25,6 +33,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: false,
     hash_comments: false,
+    names: NAMES,
     strip_family: Some(StripFamily::JsTs),
     extract_receiver: None,
     callee_filter: None,
