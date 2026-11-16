@@ -56,9 +56,10 @@ pub struct LangSpec {
     pub strip_family: Option<StripFamily>,
     /// Go-only: extract the method receiver name from file content.
     pub extract_receiver: Option<fn(&str, &tree_sitter::Language) -> Option<String>>,
-    /// Rust-only: reject a `@callee` capture that `callee_query` matched too
-    /// loosely. Consumers of the capture apply it when present.
-    pub callee_filter: Option<fn(&tree_sitter::Node) -> bool>,
+    /// Reject a `@callee` capture that `callee_query` matched too loosely,
+    /// given the captured node and the file's bytes: Rust's raw macro tokens,
+    /// Elixir's function heads. Consumers of the capture apply it when present.
+    pub callee_filter: Option<fn(&tree_sitter::Node, &[u8]) -> bool>,
     /// Rust-only: whether a call site is test code by a signal only the source
     /// carries — a `#[test]` function, a `#[cfg(test)]` module, or a file under
     /// a `tests` directory. Languages whose tests `is_test_file` recognises
@@ -405,13 +406,13 @@ mod tests {
     }
 
     #[test]
-    fn only_rust_filters_callee_captures() {
+    fn only_rust_and_elixir_filter_callee_captures() {
         for &lang in mod_all_langs_for_test() {
             assert_eq!(
                 spec(lang).callee_filter.is_some(),
-                matches!(lang, Lang::Rust),
-                "{lang:?} callee-filter presence mismatch — only Rust's callee \
-                 query has a pattern loose enough to need one"
+                matches!(lang, Lang::Rust | Lang::Elixir),
+                "{lang:?} callee-filter presence mismatch — only Rust's and \
+                 Elixir's callee queries have a pattern loose enough to need one"
             );
         }
     }

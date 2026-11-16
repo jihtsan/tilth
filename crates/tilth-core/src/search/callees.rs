@@ -90,7 +90,7 @@ pub fn extract_callee_names(
             }
 
             // Some patterns match more than a call (see `callee_filter`).
-            if callee_filter.is_some_and(|keep| !keep(&cap.node)) {
+            if callee_filter.is_some_and(|keep| !keep(&cap.node, content_bytes)) {
                 continue;
             }
 
@@ -454,6 +454,27 @@ mod tests {
         assert!(
             !names.contains(&"Lit".to_string()),
             "a braced literal is not a call, got: {names:?}"
+        );
+    }
+
+    /// A definition's head is a `call` node to tree-sitter-elixir, so the
+    /// function a range defines once counted among the functions it calls
+    /// (#377). A recursive call in the body still counts.
+    #[test]
+    fn an_elixir_definition_head_is_not_its_own_callee() {
+        let elixir = "defmodule M do\n\
+                      \x20 def run(x) when is_map(x) do\n\
+                      \x20   x |> build() |> run()\n\
+                      \x20 end\n\
+                      \x20 def build(x), do: x\n\
+                      end\n";
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((2, 4))),
+            ["build", "is_map", "run"]
+        );
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((5, 5))),
+            Vec::<String>::new()
         );
     }
 

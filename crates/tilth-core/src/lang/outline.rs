@@ -1,3 +1,4 @@
+use crate::lang::elixir::ELIXIR_FUNCTION_TARGETS;
 use crate::lang::treesitter::{
     extract_definition_name, is_or_body_of, is_type_reference, node_text_simple, NodeTextMode,
     NAMESPACE_KINDS, PASS_THROUGH_KINDS,
@@ -939,21 +940,6 @@ fn go_doc(node: tree_sitter::Node, lines: &[&str]) -> Option<String> {
 // Elixir-specific outline helpers
 // ---------------------------------------------------------------------------
 
-/// Elixir function-like definition keywords that produce `OutlineKind::Function`.
-/// This is the subset of definition keywords handled uniformly (extract function
-/// name from arguments). Container keywords (`defmodule`, `defprotocol`, `defimpl`,
-/// `defstruct`, `defexception`) have their own match arms in `elixir_call_to_entry`.
-/// See also `ELIXIR_DEFINITION_TARGETS` in `elixir.rs` for the complete set.
-const ELIXIR_DEF_KEYWORDS: &[&str] = &[
-    "def",
-    "defp",
-    "defmacro",
-    "defmacrop",
-    "defguard",
-    "defguardp",
-    "defdelegate",
-];
-
 /// Convert an Elixir `call` node to an outline entry.
 ///
 /// In the Elixir tree-sitter grammar, `defmodule`, `def`, `defp`, `defstruct`,
@@ -974,7 +960,7 @@ fn elixir_call_to_entry(
             let name = elixir_first_arg_text(node, lines)?;
             (OutlineKind::Module, name, None)
         }
-        kw if ELIXIR_DEF_KEYWORDS.contains(&kw) => {
+        kw if ELIXIR_FUNCTION_TARGETS.contains(&kw) => {
             let name = elixir_func_name(node, lines)?;
             let sig = extract_signature(node, lines);
             (OutlineKind::Function, name, Some(sig))

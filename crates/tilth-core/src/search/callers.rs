@@ -359,7 +359,7 @@ fn find_callers_treesitter_batch(
             }
 
             // Some patterns match more than a call (see `callee_filter`).
-            if callee_filter.is_some_and(|keep| !keep(&cap.node)) {
+            if callee_filter.is_some_and(|keep| !keep(&cap.node, content_bytes)) {
                 continue;
             }
 
@@ -566,6 +566,54 @@ mod tests {
                 caller_labels(file, source, target),
                 labels(want),
                 "{file}: {target}"
+            );
+        }
+    }
+
+    /// Every Elixir definition is a `call` node, and so is the head it opens
+    /// with: `def build(attrs)` holds a `build(attrs)` call. A head is where
+    /// a function is defined, not where it is called, so only the calls in
+    /// bodies, pipes, guards and default arguments are its call sites (#377).
+    #[test]
+    fn an_elixir_definition_head_is_not_a_call_site() {
+        let elixir = "defmodule M do\n\
+                      \x20 def run(x) do\n\
+                      \x20   x |> pub() |> priv()\n\
+                      \x20   mac(x)\n\
+                      \x20   macp(x)\n\
+                      \x20   guard_p(x) && guardp_p(x)\n\
+                      \x20   del(x)\n\
+                      \x20   fetch!(x)\n\
+                      \x20 end\n\
+                      \x20 def pub(x \\\\ default()), do: x\n\
+                      \x20 defp priv(x) when is_map(x), do: x\n\
+                      \x20 defp priv(x), do: priv(Map.new(x))\n\
+                      \x20 defmacro mac(x), do: x\n\
+                      \x20 defmacrop macp(x) do\n\
+                      \x20   x\n\
+                      \x20 end\n\
+                      \x20 defguard guard_p(x) when is_integer(x)\n\
+                      \x20 defguardp guardp_p(x) when guard_p(x) and x > 0\n\
+                      \x20 defdelegate del(x), to: Other\n\
+                      \x20 def fetch!(id), do: id\n\
+                      end\n";
+        for (target, want) in [
+            ("pub", &[(3, "M.run")][..]),
+            ("priv", &[(3, "M.run"), (12, "M.priv")]),
+            ("mac", &[(4, "M.run")]),
+            ("macp", &[(5, "M.run")]),
+            ("guard_p", &[(6, "M.run"), (18, "M.guardp_p")]),
+            ("guardp_p", &[(6, "M.run")]),
+            ("del", &[(7, "M.run")]),
+            ("fetch!", &[(8, "M.run")]),
+            ("default", &[(10, "M.pub")]),
+            ("is_map", &[(11, "M.priv")]),
+            ("is_integer", &[(17, "M.guard_p")]),
+        ] {
+            assert_eq!(
+                caller_labels("m.ex", elixir, target),
+                labels(want),
+                "{target}"
             );
         }
     }
