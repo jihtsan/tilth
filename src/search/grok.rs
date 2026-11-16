@@ -1261,6 +1261,38 @@ mod tests {
         }
     }
 
+    /// grok lists the callers of a name spelled with a trailing `!` or a
+    /// non-ASCII letter, which the callers pre-filter once dropped (#375).
+    #[test]
+    fn grok_lists_the_callers_of_a_bang_or_non_ascii_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(
+            tmp.path(),
+            "order.rb",
+            "class Order\n  def persist!\n    true\n  end\nend\n\norder.persist!\n",
+        );
+        write_fixture(
+            tmp.path(),
+            "uni.py",
+            "def größe():\n    return 1\n\ndef main():\n    return größe()\n",
+        );
+        for (spec, line) in [("persist!", 7), ("größe", 5)] {
+            let bloom = BloomFilterCache::default();
+            let session = crate::session::Session::default();
+            let result = grok(
+                spec,
+                tmp.path(),
+                &bloom,
+                &session,
+                GrokCaps::default(),
+                &Config::default(),
+            )
+            .unwrap_or_else(|e| panic!("{spec}: {e}"));
+            let lines: Vec<u32> = result.callers.iter().map(|m| m.line).collect();
+            assert_eq!(lines, [line], "{spec}");
+        }
+    }
+
     /// grok and search mark an expanded definition in the session under one
     /// line, so each shows the other's body as shown earlier. A definition
     /// whose annotations, decorators or return type sit above its name line

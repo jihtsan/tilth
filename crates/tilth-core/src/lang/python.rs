@@ -1,6 +1,8 @@
 //! Python language spec. Diverges on: stdlib first-segment rule (`.` separator).
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = concat!(
     "(call function: (identifier) @callee)\n",
@@ -49,6 +51,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: true,
     hash_comments: true,
+    names: NameRule::PLAIN,
     strip_family: Some(StripFamily::Python),
     extract_receiver: None,
     callee_filter: None,

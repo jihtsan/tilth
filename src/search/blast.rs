@@ -513,6 +513,42 @@ mod tests {
         );
     }
 
+    /// An edit to a name spelled with a trailing `!` or a non-ASCII letter
+    /// counts its callers, which the callers pre-filter once dropped (#375).
+    #[test]
+    fn a_blast_counts_the_callers_of_a_bang_or_non_ascii_name() {
+        for (file, def, caller, call) in [
+            (
+                "order.rb",
+                "class Order\n  def persist!\n    true\n  end\nend\n",
+                "c.rb",
+                "order.persist!\n",
+            ),
+            (
+                "lib.py",
+                "class Box:\n    def größe(self):\n        return 1\n",
+                "c.py",
+                "def main(box):\n    return box.größe()\n",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path().join(file);
+            std::fs::write(&lib, def).unwrap();
+            std::fs::write(dir.path().join(caller), call).unwrap();
+            let bloom = tilth_core::index::bloom::BloomFilterCache::new();
+            let scope = dir.path().canonicalize().unwrap();
+            let out = blast_radius(
+                &lib,
+                &[make_edit(2, 2)],
+                &scope,
+                &bloom,
+                WalkConfig::default(),
+            )
+            .unwrap_or_else(|| panic!("{file}: no blast radius"));
+            assert!(out.contains(": 1 caller\n"), "{file}: {out}");
+        }
+    }
+
     /// The walk's paths are compared with the edited file's canonical path.
     /// Under a scope reached through a symlink (`/var` on macOS), a walked
     /// path is not canonical, so the file's own recursive call could count

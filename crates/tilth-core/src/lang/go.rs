@@ -3,7 +3,7 @@
 
 use streaming_iterator::StreamingIterator;
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS};
+use crate::lang::spec::{LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS};
 
 const CALLEE_QUERY: &str = concat!(
     "(call_expression function: (identifier) @callee)\n",
@@ -96,6 +96,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: false,
     hash_comments: false,
+    names: NameRule::PLAIN,
     strip_family: Some(StripFamily::Go),
     extract_receiver: Some(extract_go_receiver_name),
     callee_filter: None,
