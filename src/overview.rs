@@ -29,12 +29,13 @@ const COUNT_CAP: usize = 10_000;
 /// look at: one two directories below the root.
 const SAMPLE_DEPTH: usize = 3;
 
-/// How long the overview may take, all its parts together. It runs
-/// synchronously in the MCP `initialize` handler, so the session waits on it.
+/// How long the overview may take, all its parts together. The MCP server
+/// computes it synchronously, at `initialize` or when the client's roots
+/// arrive, so the session waits on it.
 pub const LIMIT: Duration = Duration::from_millis(250);
 
-/// Compute a project fingerprint for MCP initialization, walking `root`
-/// by the `walk` settings every search uses.
+/// Compute a project fingerprint for the start of an MCP session, walking
+/// `root` by the `walk` settings every search uses.
 ///
 /// Every part stops at `deadline`, and a part that has not finished by then
 /// is left out: a file count cut short reads as a lower bound (`N+`), and a

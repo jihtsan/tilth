@@ -38,8 +38,9 @@ struct Services {
     /// what it searches when it names no scope. `None` when the launch
     /// directory could not be read and no other root has arrived.
     root: Option<PathBuf>,
-    /// Something the next tool result must say first, because it changed
-    /// what the call answers for: a client root the server could not use.
+    /// What the next tool result must say first: a client root the server
+    /// could not use, and the overview of a root that arrived after
+    /// `initialize`.
     notice: Option<Arc<str>>,
 }
 
@@ -85,6 +86,25 @@ impl Services {
         self.root.as_deref()
     }
 
+    /// The start-up overview of the root, or `None` when it is turned off,
+    /// there is no root, or nothing was ready by its deadline.
+    fn overview(&self) -> Option<String> {
+        let root = self.root().filter(|_| self.config().overview)?;
+        let deadline = std::time::Instant::now() + crate::overview::LIMIT;
+        let overview = crate::overview::fingerprint(root, self.config().walk, deadline);
+        (!overview.is_empty()).then_some(overview)
+    }
+
+    /// Make the next tool result say `text` first, after anything it must
+    /// already say.
+    fn say_first(&mut self, text: &str) {
+        let said = self.notice.take().map_or_else(
+            || Arc::from(text),
+            |notice| Arc::from(format!("{notice}\n\n{text}")),
+        );
+        self.notice = Some(said);
+    }
+
     /// Make the client's `root` the server's root. A root the server cannot
     /// read leaves the old one, and both stderr and the next tool result say
     /// so: stderr often goes unread.
@@ -101,7 +121,7 @@ impl Services {
                     shown::path(root)
                 );
                 diag::emit(format_args!("tilth: warning: {notice}"));
-                self.notice = Some(notice.into());
+                self.say_first(&notice);
             }
         }
     }
@@ -124,6 +144,12 @@ const EDIT_MODE_EXTRA: &str = include_str!("../../prompts/mcp-edit.md");
 /// else the package around `launch_dir`, else `launch_dir` itself. A client
 /// that supports MCP roots replaces it with its first root, unless `scope`
 /// was given. This fixes MCP hosts that launch tilth with cwd=/ (e.g., Codex).
+///
+/// The start-up overview describes the root the tools answer from, so it
+/// waits for that root. Without roots to wait for, it opens the
+/// `initialize` instructions. Otherwise it opens the first tool result after
+/// the roots answer, and the instructions, which start every prompt the
+/// host sends, never change.
 pub fn run(
     config: Config,
     edit_mode: bool,
@@ -192,6 +218,11 @@ pub fn run(
                     services.take_client_root(&root);
                 }
                 warn_no_root(&services);
+                // The root is known now, and `initialize` left its overview
+                // out.
+                if let Some(overview) = services.overview() {
+                    services.say_first(&overview);
+                }
                 continue;
             }
         }
@@ -218,7 +249,22 @@ pub fn run(
             params,
         };
 
-        let response = handle_request(&req, &services);
+        // A client with roots names the root after this answer, so the
+        // root is not known yet.
+        let asks_roots = method == "initialize"
+            && pending_roots_id.is_none()
+            && !scope_is_explicit
+            && req.params["capabilities"].get("roots").is_some();
+        let response = if method == "initialize" {
+            let overview = if asks_roots || pending_roots_id.is_some() {
+                None
+            } else {
+                services.overview()
+            };
+            initialize(req.id.clone(), services.edit_mode(), overview.as_deref())
+        } else {
+            handle_request(&req, &services)
+        };
         if method == "tools/call" {
             services.notice = None;
         }
@@ -226,24 +272,11 @@ pub fn run(
         stdout.write_all(b"\n")?;
         stdout.flush()?;
 
-        // After initialize response: send roots/list if client supports it
-        // and we don't already have an explicit --scope
-        if method == "initialize" && pending_roots_id.is_none() {
-            let client_caps = req.params.get("capabilities").unwrap_or(&Value::Null);
-            if !scope_is_explicit && client_caps.get("roots").is_some() {
-                let roots_id = Value::String("tilth_roots_1".to_string());
-                let roots_req = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": roots_id,
-                    "method": "roots/list"
-                });
-                serde_json::to_writer(&mut stdout, &roots_req)?;
-                stdout.write_all(b"\n")?;
-                stdout.flush()?;
-                pending_roots_id = Some(roots_id);
-            } else {
-                warn_no_root(&services);
-            }
+        // After the initialize response: ask a client with roots for them.
+        if asks_roots {
+            pending_roots_id = Some(request_roots(&mut stdout)?);
+        } else if method == "initialize" && pending_roots_id.is_none() {
+            warn_no_root(&services);
         }
     }
 
@@ -312,48 +345,37 @@ struct JsonRpcError {
     message: String,
 }
 
+/// The answer to `initialize`: the instructions, opened by `overview` when
+/// there is one.
+fn initialize(id: Option<Value>, edit_mode: bool, overview: Option<&str>) -> JsonRpcResponse {
+    let extra = if edit_mode { EDIT_MODE_EXTRA } else { "" };
+    let instructions = overview.map_or_else(
+        || format!("{SERVER_INSTRUCTIONS}{extra}"),
+        |overview| format!("{overview}\n\n{SERVER_INSTRUCTIONS}{extra}"),
+    );
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "tilth",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "instructions": instructions
+        })),
+        error: None,
+    }
+}
+
+/// Answer a request other than `initialize`, which `run` answers: only it
+/// knows whether the root is settled yet.
 fn handle_request(req: &JsonRpcRequest, services: &Services) -> JsonRpcResponse {
     let edit_mode = services.edit_mode();
     match req.method.as_str() {
-        "initialize" => {
-            // Without a root there is nothing to describe; `run` says why
-            // once it knows no root is coming.
-            let overview = match services.root() {
-                Some(root) if services.config().overview => {
-                    let deadline = std::time::Instant::now() + crate::overview::LIMIT;
-                    crate::overview::fingerprint(root, services.config().walk, deadline)
-                }
-                _ => String::new(),
-            };
-            let instructions = if edit_mode {
-                if overview.is_empty() {
-                    format!("{SERVER_INSTRUCTIONS}{EDIT_MODE_EXTRA}")
-                } else {
-                    format!("{overview}\n\n{SERVER_INSTRUCTIONS}{EDIT_MODE_EXTRA}")
-                }
-            } else if overview.is_empty() {
-                SERVER_INSTRUCTIONS.to_string()
-            } else {
-                format!("{overview}\n\n{SERVER_INSTRUCTIONS}")
-            };
-            JsonRpcResponse {
-                jsonrpc: "2.0",
-                id: req.id.clone(),
-                result: Some(serde_json::json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
-                    "serverInfo": {
-                        "name": "tilth",
-                        "version": env!("CARGO_PKG_VERSION")
-                    },
-                    "instructions": instructions
-                })),
-                error: None,
-            }
-        }
-
         "tools/list" => JsonRpcResponse {
             jsonrpc: "2.0",
             id: req.id.clone(),
@@ -511,6 +533,21 @@ fn build_tool_response(id: Option<Value>, result: Result<String, String>) -> Jso
         result: Some(payload),
         error: None,
     }
+}
+
+/// Ask the client for its roots. Returns the request's id, which the answer
+/// carries.
+fn request_roots(w: &mut impl Write) -> io::Result<Value> {
+    let id = Value::String("tilth_roots_1".to_string());
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "roots/list"
+    });
+    serde_json::to_writer(&mut *w, &req)?;
+    w.write_all(b"\n")?;
+    w.flush()?;
+    Ok(id)
 }
 
 fn write_error(w: &mut impl Write, id: Option<Value>, code: i32, msg: &str) -> io::Result<()> {

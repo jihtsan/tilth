@@ -107,7 +107,7 @@ src/
 ├── budget.rs        Token cap (truncate output to a token budget)
 ├── session.rs       Per-MCP-process counters: reads, searches, top
 │                    queries, hot dirs, expanded-set dedup
-├── overview.rs      Project fingerprint emitted at MCP `initialize`
+├── overview.rs      Project fingerprint that opens an MCP session
 ├── map.rs           tilth --map: structural tree of the codebase
 ├── install.rs       Writes MCP server entries into ~20 host configs
 ├── edit.rs          Hash-anchored line edits + EditResult diff preview
@@ -205,8 +205,8 @@ free-form path:
 - `tilth install <host>` — delegates to `install::run`.
 - `tilth diff [<source>]` — bypasses `lib.rs` entirely and goes
   through `diff::resolve_source` + `diff::diff`.
-- `tilth overview` — prints the project fingerprint that the MCP
-  `initialize` response would inject.
+- `tilth overview` — prints the project fingerprint that opens an MCP
+  session.
 
 The default (no-subcommand) mode dispatches into `lib::run` (or
 `run_full`, `run_expanded`, `run_callers`, `run_deps`,
@@ -260,9 +260,13 @@ methods worth describing in detail:
   as a pre-flight gate naming the exact Bash commands and host tools to
   avoid, with concrete `<bad>→<good>` rewrites. When
   `Config::overview` is on (no `TILTH_NO_OVERVIEW`, no `--no-overview`),
-  `overview::fingerprint(root, walk, deadline)` is prepended, for the
-  server's root at that moment — a project summary that stops at a 250 ms
-  deadline and leaves out what it had not finished.
+  `overview::fingerprint(root, walk, deadline)` is prepended — a project
+  summary that stops at a 250 ms deadline and leaves out what it had not
+  finished. It describes the root the tools answer from, so it is prepended
+  only when that root is known at `initialize`: with `--scope`, or for a
+  client without roots. A client with roots gets it at the start of the
+  first tool result after its roots answer instead, so the instructions,
+  which open every prompt the host sends, stay the same all session.
 - `tools/list` — returns the tool schemas. `tools/call` is the workhorse
   and goes through `handle_tool_call`.
 
@@ -1087,7 +1091,9 @@ arrives. Each tool call runs on its own copy of `Services`, so a call in
 flight keeps the root it started with and the next call sees the new
 one; nothing is shared that could change under it. This is what makes
 tilth work correctly with hosts that launch it from a non-project
-directory.
+directory. A call sent before the answer runs against the launch
+directory, which its header names, and gets no overview; the first call
+after the answer gets the overview of the root it settled on.
 
 **Per-request thread model.** Every `tools/call` is run on a fresh
 `std::thread::spawn`-ed worker. The main loop waits with
@@ -1121,8 +1127,8 @@ agents kept reaching for those despite earlier "DO NOT use
 Grep/Read/Glob" rules. Edit mode appends an `EDIT_MODE_EXTRA` block
 from `prompts/mcp-edit.md` with the `tilth_write` instructions.
 `overview::fingerprint(root, walk, deadline)` is prepended unless `Config::overview` is
-off — a brief summary of language counts, manifests, hot files,
-and git context.
+off, or the root waits on the client's roots — a brief summary of
+language counts, manifests, hot files, and git context.
 
 `AGENTS.md` at the repo root is the user-facing copy of these
 instructions for hosts that read prompts from disk rather than via
@@ -1186,8 +1192,8 @@ user-facing.
   A step that blocks (a slow read or stat) can still run past it. When
   the overview stops at its deadline, stderr says so and how far past it
   ended. Wrapped in `catch_unwind`. Output is the project
-  summary that the MCP `initialize` response prepends to
-  `SERVER_INSTRUCTIONS`.
+  summary that the MCP server prepends to `SERVER_INSTRUCTIONS`, or to
+  the first tool result after a client's roots answer.
 - **`map.rs`** — `tilth --map` generates a structural codebase tree:
   per-directory token estimates, top-level symbols per file, depth
   control. CLI-only — the MCP boundary doesn't expose it (no schema
