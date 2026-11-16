@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use crate::format::noun;
+use crate::format::{noun, rel};
 use tilth_core::index::bloom::BloomFilterCache;
 use tilth_core::search::callers::{find_callers_and_owners, find_callers_batch, CallerMatch};
 use tilth_core::search::walk::Walk;
+use tilth_core::shown;
 use tilth_core::TilthError;
 
 const MAX_MATCHES: usize = 10;
@@ -203,7 +204,7 @@ fn write_caller_bucket(
         output,
         "# Callers of \"{}\" in {} — {shown}{} {}",
         target,
-        scope.display(),
+        shown::path(scope),
         total,
         noun(total, "call site", "call sites")
     );
@@ -220,11 +221,7 @@ fn write_caller_bucket(
         let _ = write!(
             output,
             "\n## {}:{} [caller: {}]\n",
-            caller
-                .path
-                .strip_prefix(scope)
-                .unwrap_or(&caller.path)
-                .display(),
+            rel(&caller.path, scope),
             caller.line,
             caller.calling_function
         );
@@ -422,11 +419,7 @@ fn write_second_hop_impact(
     output.push_str("\n-- impact (2nd hop) --\n");
 
     for site in &listed {
-        let rel_path = site
-            .path
-            .strip_prefix(walk.scope)
-            .unwrap_or(&site.path)
-            .display();
+        let rel_path = rel(&site.path, walk.scope);
         let _ = writeln!(
             output,
             "  {:<20} {}:{}  -> {}",
@@ -567,7 +560,7 @@ fn no_callers_message(target: &str, scope: &Path, target_seen: bool, glob: Optio
             "# Callers of \"{target}\" in {scope_disp} — no call sites found\n\n\
              The name \"{target}\" does not appear anywhere in scope. \
              Check the spelling, or widen scope if you expected hits outside this directory.",
-            scope_disp = scope.display()
+            scope_disp = shown::path(scope)
         );
     }
     // Only mention glob-driven test exclusion when a glob was actually used.
@@ -587,7 +580,7 @@ fn no_callers_message(target: &str, scope: &Path, target_seen: bool, glob: Optio
          \n  • framework registration (HTTP routes, JSON-RPC, plugin systems, decorators)\
          \n  • function values stored in maps, structs, or passed as callbacks{glob_hint}\n\
          \nVerify with `tilth_search \"{target}\"` to see how it's referenced before assuming dead code.",
-        scope_disp = scope.display()
+        scope_disp = shown::path(scope)
     )
 }
 

@@ -24,6 +24,8 @@ pub mod lang;
 #[doc(hidden)]
 pub mod search;
 #[doc(hidden)]
+pub mod shown;
+#[doc(hidden)]
 pub mod source;
 #[cfg(any(test, feature = "test-fixtures"))]
 #[doc(hidden)]

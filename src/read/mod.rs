@@ -16,6 +16,7 @@ use tilth_core::error::TilthError;
 use tilth_core::lang::detection;
 use tilth_core::lang::outline::{heading_level, heading_text, parse_markdown};
 use tilth_core::lang::{detect_file_type, detect_file_type_with_content};
+use tilth_core::shown;
 use tilth_core::source::{read_chunks, OpenFile, STREAM_CHUNK};
 use tilth_core::source::{strip_bom, strip_bom_bytes};
 use tilth_core::types::FileType;
@@ -409,7 +410,7 @@ pub(crate) fn related_hint<'a>(related: impl ExactSizeIterator<Item = &'a Path>)
     }
     format!(
         "\n\n> Related: {}",
-        format::capped_list(related.map(Path::display), RELATED_HINT_LIMIT)
+        format::capped_list(related.map(shown::path), RELATED_HINT_LIMIT)
     )
 }
 
@@ -924,7 +925,6 @@ fn list_directory(path: &Path) -> Result<String, TilthError> {
     for entry in &items {
         let ft = entry.file_type().ok();
         let name = entry.file_name();
-        let name = name.to_string_lossy();
         let meta = entry.metadata().ok();
 
         let suffix = match ft {
@@ -935,12 +935,12 @@ fn list_directory(path: &Path) -> Result<String, TilthError> {
                 format!("  ({tokens} {})", format::noun(tokens, "token", "tokens"))
             }),
         };
-        entries.push(format!("  {name}{suffix}"));
+        entries.push(format!("  {}{suffix}", shown::path(&name)));
     }
 
     let header = format!(
         "# {} ({} {})",
-        path.display(),
+        shown::path(path),
         items.len(),
         format::noun(items.len(), "item", "items")
     );
@@ -954,7 +954,8 @@ pub fn suggest_similar_file(scope: &Path, query: &str) -> Option<String> {
     suggest_similar(&resolved)
 }
 
-/// Suggest a similar file name from the parent directory (edit distance).
+/// Suggest a similar file name from the parent directory (edit distance),
+/// as [`shown::path`] prints it.
 fn suggest_similar(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let name = path.file_name()?.to_str()?;
@@ -973,7 +974,7 @@ fn suggest_similar(path: &Path) -> Option<String> {
             }
         }
     }
-    best.map(|(_, name)| name)
+    best.map(|(_, name)| shown::path(&name).to_string())
 }
 
 /// Levenshtein distance over Unicode scalar values.

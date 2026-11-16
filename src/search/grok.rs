@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::format::noun;
+use crate::format::{noun, rel};
 use crate::search::search_symbol_raw;
 use tilth_core::error::TilthError;
 use tilth_core::index::bloom::BloomFilterCache;
@@ -17,6 +17,7 @@ use tilth_core::lang::outline::get_outline_entries;
 use tilth_core::search::callees::{extract_callee_names, resolve_callees, ResolvedCallee};
 use tilth_core::search::callers::{find_callers_batch, CallerMatch};
 use tilth_core::search::walk::Walk;
+use tilth_core::shown;
 use tilth_core::types::{is_test_file, FileType, Lang, OutlineEntry, OutlineKind};
 
 /// What grok resolved the user's target string to.
@@ -156,7 +157,7 @@ fn read_code_file(path: &Path, cap: u64) -> Result<(String, Lang), TilthError> {
     })?;
     let FileType::Code(lang) = detect_file_type(path) else {
         return Err(TilthError::InvalidQuery {
-            query: path.display().to_string(),
+            query: shown::path(path).to_string(),
             reason: "not a code file — grok needs source code".to_string(),
         });
     };
@@ -165,7 +166,7 @@ fn read_code_file(path: &Path, cap: u64) -> Result<(String, Lang), TilthError> {
     // the outline parser. Refuse on size first, before reading any bytes.
     if meta.len() > cap {
         return Err(TilthError::InvalidQuery {
-            query: path.display().to_string(),
+            query: shown::path(path).to_string(),
             reason: format!(
                 "file too large for grok ({}B > {cap}B cap) — use tilth_search \"<symbol>\" for matches in this file",
                 meta.len()
@@ -178,7 +179,7 @@ fn read_code_file(path: &Path, cap: u64) -> Result<(String, Lang), TilthError> {
     })?;
     let Some(mut content) = tilth_core::source::into_text(bytes) else {
         return Err(TilthError::InvalidQuery {
-            query: path.display().to_string(),
+            query: shown::path(path).to_string(),
             reason: "binary or non-text file (null bytes in first 512B) — grok needs source; \
                      use tilth_search \"<symbol>\" for matches in this file"
                 .to_string(),
@@ -723,7 +724,7 @@ fn body_with_dedup(
     let _ = write!(
         preview,
         "// [{line_count}-line body shown earlier — {}:{}]",
-        target.path.display(),
+        shown::path(&target.path),
         target.start_line
     );
     preview
@@ -782,7 +783,7 @@ fn slice_body(content: &str, start_line: u32, end_line: u32, max_lines: usize) -
 )]
 pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
     let mut out = String::new();
-    let target_rel = display_rel(&result.target.path, scope);
+    let target_rel = rel(&result.target.path, scope);
 
     // Header
     let _ = writeln!(
@@ -834,7 +835,7 @@ pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
     // Delegate body — rendered immediately after the wrapper's own body
     // when the thin-wrapper predicate fired during assembly.
     if let Some((callee, callee_body)) = &result.delegate_body {
-        let callee_rel = display_rel(&callee.file, scope);
+        let callee_rel = rel(&callee.file, scope);
         let _ = writeln!(
             out,
             "\n## delegate body — {}:{}",
@@ -863,7 +864,7 @@ pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
         }
         for (file, mut callees) in by_file {
             callees.sort_by_key(|c| c.start_line);
-            let _ = writeln!(out, "  {}", display_rel(file, scope));
+            let _ = writeln!(out, "  {}", rel(file, scope));
             for c in callees {
                 let sig = c.signature.as_deref().unwrap_or("");
                 let _ = writeln!(
@@ -885,7 +886,7 @@ pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
             let _ = writeln!(
                 out,
                 "callees may be defined in {} (over {}, not parsed)",
-                display_rel(file, scope),
+                rel(file, scope),
                 tilth_core::source::max_file_size_label()
             );
         }
@@ -907,7 +908,7 @@ pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
         }
         for (file, mut callers) in by_file {
             callers.sort_by_key(|m| m.line);
-            let _ = writeln!(out, "  {}", display_rel(file, scope));
+            let _ = writeln!(out, "  {}", rel(file, scope));
             for m in callers {
                 let _ = writeln!(out, "    [{}]   in {}()", m.line, m.calling_function);
             }
@@ -949,7 +950,7 @@ pub fn format_grok(result: &GrokResult, scope: &Path) -> String {
             count_label(result.tests.len(), result.total_tests)
         );
         for t in &result.tests {
-            let r = display_rel(&t.path, scope);
+            let r = rel(&t.path, scope);
             let _ = writeln!(out, "{:<35} {}:{}", t.test_name, r, t.line);
         }
         if result.tests.len() < result.total_tests {
@@ -976,14 +977,6 @@ fn count_label(shown: usize, total: usize) -> String {
     } else {
         format!("{shown} of {total}")
     }
-}
-
-/// Render `path` relative to `scope` if possible, else the absolute path.
-fn display_rel(path: &Path, scope: &Path) -> String {
-    path.strip_prefix(scope)
-        .unwrap_or(path)
-        .display()
-        .to_string()
 }
 
 fn kind_label(kind: OutlineKind) -> &'static str {
@@ -1421,7 +1414,7 @@ mod tests {
         ] {
             let (target, _, _) =
                 resolve_by_path_line(path, line, Config::default().full_size_cap).unwrap();
-            assert_eq!(target.name, name, "{}:{line}", path.display());
+            assert_eq!(target.name, name, "{path:?}:{line}");
         }
     }
 

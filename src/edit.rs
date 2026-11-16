@@ -14,6 +14,7 @@ use crate::util::WriteOutcome;
 use tilth_core::error::TilthError;
 use tilth_core::index::bloom::BloomFilterCache;
 use tilth_core::search::walk::WalkConfig;
+use tilth_core::shown;
 
 /// One write guard per file, keyed by [`normalize_path_key`].
 ///
@@ -466,7 +467,7 @@ pub(crate) fn detect_duplicate_paths(tasks: &[FileEditTask]) -> Option<String> {
             if !seen.insert(normalize_path_key(path)) {
                 return Some(format!(
                     "duplicate file path in batch: {} — group all edits for a file under one entry",
-                    path.display()
+                    shown::path(path)
                 ));
             }
         }
@@ -558,9 +559,9 @@ impl AppliedFile {
         let abs = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
         let body = format!("{}{}", self.body, blast.unwrap_or_default());
         if body.is_empty() {
-            format!("## {}", abs.display())
+            format!("## {}", shown::path(&abs))
         } else {
-            format!("## {}\n{body}", abs.display())
+            format!("## {}\n{body}", shown::path(&abs))
         }
     }
 }
@@ -575,7 +576,7 @@ fn apply_one(
 ) -> Result<(AppliedFile, Option<BlastQuery>), String> {
     let (path, edits) = match task {
         FileEditTask::ParseError { label, msg } => {
-            return Err(format!("## {label}\nerror: {msg}"));
+            return Err(format!("## {}\nerror: {msg}", shown::path(&label)));
         }
         FileEditTask::Ready { path, edits } => (path, edits),
     };
@@ -588,7 +589,7 @@ fn apply_one(
             let query = crate::search::blast::blast_query(&path, &edits, scope);
             Ok((AppliedFile { path, body }, query))
         }
-        Err(msg) => Err(format!("## {}\n{msg}", path.display())),
+        Err(msg) => Err(format!("## {}\n{msg}", shown::path(&path))),
     }
 }
 

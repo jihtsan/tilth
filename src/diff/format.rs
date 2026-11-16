@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::budget;
 use crate::format::{noun, rel};
 use crate::types::estimate_tokens;
+use tilth_core::shown;
 
 use super::{
     ChangeType, CommitSummary, Conflict, DiffLine, DiffLineKind, FileOverlay, MatchConfidence,
@@ -257,7 +258,7 @@ pub(crate) fn format_function_detail(overlay: &FileOverlay, fn_name: &str) -> St
                 });
             return format!(
                 "# Diff: {} — `{fn_name}` not found in diff{why}",
-                overlay.path.display()
+                shown::path(&overlay.path)
             );
         }
         [one] => *one,
@@ -265,7 +266,7 @@ pub(crate) fn format_function_detail(overlay: &FileOverlay, fn_name: &str) -> St
             let names: Vec<String> = many.iter().map(|c| c.qualified_name()).collect();
             return format!(
                 "# Diff: {} — `{fn_name}` is ambiguous: {}. Name one as path:Type::{fn_name}",
-                overlay.path.display(),
+                shown::path(&overlay.path),
                 names.join(", ")
             );
         }
@@ -280,7 +281,7 @@ pub(crate) fn format_function_detail(overlay: &FileOverlay, fn_name: &str) -> St
     let _ = writeln!(
         out,
         "# Diff: {} — {marker} {name} (L{line}-{end_line})",
-        overlay.path.display()
+        shown::path(&overlay.path)
     );
     let _ = writeln!(out, "  {name} ({label})");
     write_signatures(&mut out, change);

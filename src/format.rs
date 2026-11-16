@@ -2,6 +2,7 @@ use std::fmt::{Display, Write};
 use std::path::Path;
 
 use crate::types::{estimate_tokens, ViewMode};
+use tilth_core::shown;
 
 /// The noun that follows a count of `n`: `one` when `n` is exactly 1 and
 /// `many` otherwise, as in "0 lines", "1 line", "2 lines". In "3 of 5 lines"
@@ -48,7 +49,7 @@ pub fn file_header(path: &Path, byte_len: u64, line_count: u32, mode: ViewMode) 
     };
     format!(
         "# {} ({line_count} {}, {token_str}) [{mode}]",
-        path.display(),
+        shown::path(path),
         noun(line_count, "line", "lines")
     )
 }
@@ -56,7 +57,7 @@ pub fn file_header(path: &Path, byte_len: u64, line_count: u32, mode: ViewMode) 
 /// Build header for binary files: `# path (binary, size, mime) [skipped]`
 pub fn binary_header(path: &Path, byte_len: u64, mime: &str) -> String {
     let summary = binary_summary(byte_len, mime);
-    format!("# {} ({summary}) [skipped]", path.display())
+    format!("# {} ({summary}) [skipped]", shown::path(path))
 }
 
 /// The `binary, <size>, <mime>` fragment shared by read headers and glob previews.
@@ -94,7 +95,7 @@ pub fn search_header(
             noun(u, "usage", "usages")
         ),
     };
-    let header = format!("# Search: \"{query}\" in {} — {parts}", scope.display());
+    let header = format!("# Search: \"{query}\" in {} — {parts}", shown::path(scope));
     // Only a header with a definition states a usage count.
     if !by_qualified_text || defs == 0 {
         return header;
@@ -192,12 +193,10 @@ pub(crate) fn parse_anchor(s: &str) -> Option<(usize, u16)> {
     Some((line, hash))
 }
 
-/// Path relative to scope for cleaner output. Falls back to full path.
+/// Path relative to scope for cleaner output, as [`shown::path`] prints it.
+/// Falls back to full path.
 pub(crate) fn rel(path: &Path, scope: &Path) -> String {
-    path.strip_prefix(scope)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    shown::path(path.strip_prefix(scope).unwrap_or(path)).to_string()
 }
 
 #[cfg(test)]

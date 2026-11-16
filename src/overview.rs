@@ -12,6 +12,7 @@ use crate::format::{self, noun};
 use crate::git::Git;
 use tilth_core::lang::detect_file_type;
 use tilth_core::search::walk::{base_walk_builder, WalkConfig};
+use tilth_core::shown;
 use tilth_core::types::{FileType, Lang};
 
 /// How many directories the `dirs:` line lists before it counts the rest.
@@ -113,7 +114,7 @@ fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize, deadline: Instan
         let mut dirs: Vec<String> = modules
             .iter()
             .take(DIRS_SHOWN)
-            .map(|m| format!("{m}/"))
+            .map(|m| format!("{}/", shown::path(m)))
             .collect();
         dirs.extend(format::and_more(modules.len(), DIRS_SHOWN));
         lines.push(format!("  dirs: {}", dirs.join(" ")));
@@ -808,7 +809,7 @@ fn hot_files(
     // scanning import sources that reference this file's module name.
     let parts = sorted.iter().map(|(path, count)| {
         let rel = path.strip_prefix(root).unwrap_or(path);
-        let rel_str = rel.display().to_string();
+        let rel_str = shown::path(rel).to_string();
 
         // Derive the module name from the file path
         // src/types.rs → "types", src/lang/mod.rs → "lang", src/error.rs → "error"

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tilth_core::lang::detect_file_type_with_content;
 use tilth_core::lang::outline::get_outline_entries;
+use tilth_core::shown;
 use tilth_core::types::{FileType, OutlineEntry, OutlineKind};
 
 use super::matching::{build_diff_symbols, match_symbols};
@@ -347,7 +348,7 @@ fn read_side(side: &Side, path: &Path, repo: &Path) -> Result<String, String> {
     let path_str = path.to_string_lossy();
     let read = |file: &Path| {
         tilth_core::source::read_to_string(&repo.join(file))
-            .map_err(|e| format!("cannot read {}: {e}", file.display()))
+            .map_err(|e| format!("cannot read {}: {e}", shown::path(file)))
     };
     match side {
         Side::Rev(rev) => git_show(&format!("{rev}:{path_str}"), repo).map_err(|e| e.to_string()),
@@ -356,8 +357,8 @@ fn read_side(side: &Side, path: &Path, repo: &Path) -> Result<String, String> {
         Side::File(root) => read(&file_under(root, path).ok_or_else(|| {
             format!(
                 "cannot read {}: the patch names it outside {}",
-                path.display(),
-                root.display()
+                shown::path(path),
+                shown::path(root)
             )
         })?),
         Side::Unavailable => Ok(String::new()),
@@ -496,7 +497,7 @@ mod tests {
         assert!(overlay.symbol_changes.is_empty(), "{overlay:?}");
         let error = overlay.read_error.as_deref().unwrap_or_default();
         assert!(
-            error.starts_with(&format!("cannot read {}: ", missing.display())),
+            error.starts_with(&format!("cannot read {}: ", shown::path(&missing))),
             "{overlay:?}"
         );
         assert_eq!(overlay.other_lines.len(), 2, "{overlay:?}");

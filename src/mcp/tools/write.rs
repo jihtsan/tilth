@@ -21,6 +21,7 @@ use crate::session::Session;
 use crate::timeout::TimeLimit;
 use tilth_core::index::bloom::BloomFilterCache;
 use tilth_core::search::walk::WalkConfig;
+use tilth_core::shown;
 
 /// Parse one `files[]` entry into a hash-mode edit task. Parse errors are
 /// deferred onto the task so a malformed entry surfaces as a per-file failure
@@ -250,20 +251,17 @@ fn cross_worktree_warning(path: &Path, server_root: &Path) -> Option<String> {
         "\n⚠️  cross-worktree write: resolved path is {} (git root: {}), \
          server root's git root: {}. Pass `root` or use an absolute path to \
          make the target explicit.",
-        resolved.display(),
-        write_root.display(),
-        server_git_root.display(),
+        shown::path(&resolved),
+        shown::path(&write_root),
+        shown::path(&server_git_root),
     ))
 }
 
 /// Returns the resolved absolute path of `path` for success output, falling
-/// back to `path.display()` if canonicalize fails. Callers must only invoke
+/// back to `path` itself if canonicalize fails. Callers must only invoke
 /// this after a successful write so the file exists.
 fn resolved_display(path: &Path) -> String {
-    path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf())
-        .display()
-        .to_string()
+    shown::path(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf())).to_string()
 }
 
 #[expect(clippy::too_many_lines, reason = "split by responsibility in #315")]
@@ -408,8 +406,8 @@ pub(in crate::mcp) fn tool_write(
                 if !path_within_scope(&path, root) {
                     direct_results.push(format!(
                         "## {}\nerror: refusing write outside scope ({}); {widen_hint}",
-                        path.display(),
-                        root.display()
+                        shown::path(&path),
+                        shown::path(root)
                     ));
                     continue;
                 }
@@ -417,7 +415,7 @@ pub(in crate::mcp) fn tool_write(
             Err(e) => {
                 direct_results.push(format!(
                     "## {}\nerror: scope unresolvable ({e}); refusing write",
-                    path.display(),
+                    shown::path(&path),
                 ));
                 continue;
             }
@@ -432,14 +430,14 @@ pub(in crate::mcp) fn tool_write(
                 let Some(content) = f.get("content").and_then(|v| v.as_str()) else {
                     direct_results.push(format!(
                         "## {}\nerror: 'content' must be a string",
-                        path.display()
+                        shown::path(&path)
                     ));
                     continue;
                 };
                 let Some(overwrite) = parse_overwrite_flag(f) else {
                     direct_results.push(format!(
                         "## {}\nerror: 'overwrite' must be a boolean",
-                        path.display()
+                        shown::path(&path)
                     ));
                     continue;
                 };
@@ -474,18 +472,18 @@ pub(in crate::mcp) fn tool_write(
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         direct_results.push(format!(
                             "## {}\nerror: {}",
-                            path.display(),
+                            shown::path(&path),
                             tilth_core::error::TilthError::AlreadyExists { path: path.clone() }
                         ));
                     }
-                    Err(e) => direct_results.push(format!("## {}\nerror: {e}", path.display())),
+                    Err(e) => direct_results.push(format!("## {}\nerror: {e}", shown::path(&path))),
                 }
             }
             "append" | "a" => {
                 let Some(content) = f.get("content").and_then(|v| v.as_str()) else {
                     direct_results.push(format!(
                         "## {}\nerror: 'content' must be a string",
-                        path.display()
+                        shown::path(&path)
                     ));
                     continue;
                 };
@@ -509,12 +507,12 @@ pub(in crate::mcp) fn tool_write(
                         direct_results.push(block);
                         direct_applied.push(path);
                     }
-                    Err(e) => direct_results.push(format!("## {}\nerror: {e}", path.display())),
+                    Err(e) => direct_results.push(format!("## {}\nerror: {e}", shown::path(&path))),
                 }
             }
             other => direct_results.push(format!(
                 "## {}\nerror: unknown mode '{other}' (use hash, overwrite, append)",
-                path.display()
+                shown::path(&path)
             )),
         }
     }

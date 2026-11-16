@@ -10,7 +10,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use tilth::config::{env_var, launch_dir, Config};
 use tilth::{diag, FileScopeHint};
-use tilth_core::Walk;
+use tilth_core::{shown, Walk};
 
 /// tilth — Tree-sitter indexed lookups, smart code reading for AI agents.
 /// One tool replaces `read_file`, grep, glob, `ast_grep`, and find.
@@ -443,7 +443,7 @@ fn cli_scope(raw: &Path, hint: FileScopeHint) -> Result<PathBuf, String> {
     if !scope.is_dir() {
         return Err(format!(
             "scope \"{}\" is not a valid directory. {}",
-            raw.display(),
+            shown::path(raw),
             tilth::missing_scope_hint(raw, &scope, Path::new("."))
         ));
     }
