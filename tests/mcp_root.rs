@@ -1,4 +1,5 @@
-//! How the MCP server finds its project root, checked on the built binary.
+//! How the MCP server finds its project root, and that its start-up overview
+//! describes that root, checked on the built binary.
 //!
 //! The server resolves its root once at startup, from `--scope` or the
 //! directory it was launched in, and again when the client answers
@@ -24,26 +25,48 @@ impl Run {
         reason = "by design: a test helper, where a panic is the test failure"
     )]
     fn text(&self, id: u64) -> &str {
+        self.result(id)["content"][0]["text"]
+            .as_str()
+            .expect("a tool result with this id")
+    }
+
+    /// The instructions the `initialize` answer (id 0) gave.
+    #[expect(
+        clippy::expect_used,
+        reason = "by design: a test helper, where a panic is the test failure"
+    )]
+    fn instructions(&self) -> &str {
+        self.result(0)["instructions"]
+            .as_str()
+            .expect("an initialize result")
+    }
+
+    /// The result of the response with `id`, or `null` when there is none.
+    fn result(&self, id: u64) -> &Value {
         self.responses
             .iter()
             .find(|r| r["id"] == id)
-            .and_then(|r| r["result"]["content"][0]["text"].as_str())
-            .expect("a tool result with this id")
+            .map_or(&Value::Null, |r| &r["result"])
     }
 }
 
 /// Run `tilth --mcp <flags>` from `launch`, send it `messages`, and close its
-/// stdin.
+/// stdin. The start-up overview is on only when `overview` is set.
 #[expect(
     clippy::expect_used,
     reason = "by design: a test helper, where a panic is the test failure"
 )]
-fn serve(launch: &Path, flags: &[&str], messages: &[Value]) -> Run {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tilth"))
+fn serve(launch: &Path, flags: &[&str], overview: bool, messages: &[Value]) -> Run {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tilth"));
+    if overview {
+        command.env_remove("TILTH_NO_OVERVIEW");
+    } else {
+        command.env("TILTH_NO_OVERVIEW", "1");
+    }
+    let mut child = command
         .arg("--mcp")
         .args(flags)
         .current_dir(launch)
-        .env("TILTH_NO_OVERVIEW", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -112,6 +135,7 @@ fn the_clients_root_replaces_the_launch_directory() {
     let run = serve(
         launch.path(),
         &["--edit"],
+        false,
         &[
             initialize(true),
             roots_answer(client.path()),
@@ -140,6 +164,7 @@ fn an_explicit_scope_outranks_the_clients_root() {
     let run = serve(
         launch.path(),
         &["--scope", scope.path().to_str().unwrap()],
+        false,
         &[
             initialize(true),
             roots_answer(client.path()),
@@ -147,4 +172,130 @@ fn an_explicit_scope_outranks_the_clients_root() {
         ],
     );
     assert!(run.text(1).contains("lib.rs:1"), "{}", run.text(1));
+}
+
+// -- The start-up overview (#384) ---------------------------------------------
+
+/// How every overview starts.
+const OVERVIEW: &str = "[tilth] ";
+
+/// A directory holding one Python file, so its overview reads "Python
+/// project" where a `defining` directory's reads "Rust project".
+#[expect(
+    clippy::unwrap_used,
+    reason = "by design: a test helper, where a panic is the test failure"
+)]
+fn python_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "def main():\n    pass\n").unwrap();
+    dir
+}
+
+/// A client with roots names its root only after `initialize`, so an
+/// overview there would describe the launch directory, which the tools stop
+/// answering from. The instructions carry none, and the first tool result
+/// after the roots answer opens with the client root's, once.
+#[test]
+fn with_client_roots_the_overview_describes_the_clients_root() {
+    let launch = python_project();
+    let client = defining("in_client_zq");
+    let search = json!({ "query": "in_client_zq" });
+    let run = serve(
+        launch.path(),
+        &[],
+        true,
+        &[
+            initialize(true),
+            roots_answer(client.path()),
+            call(1, "tilth_search", &search),
+            call(2, "tilth_search", &search),
+        ],
+    );
+    assert!(
+        !run.instructions().contains(OVERVIEW),
+        "{}",
+        run.instructions()
+    );
+    assert!(
+        run.text(1).starts_with("[tilth] Rust project") && run.text(1).contains("lib.rs:1"),
+        "{}",
+        run.text(1)
+    );
+    assert!(!run.text(2).contains(OVERVIEW), "{}", run.text(2));
+}
+
+/// A call sent before the roots answer runs against the launch directory,
+/// whose overview was never given, so it gets none. The first call after the
+/// answer gets the client root's.
+#[test]
+fn a_call_before_the_roots_answer_gets_no_overview() {
+    let launch = python_project();
+    let client = defining("in_client_zq");
+    let search = json!({ "query": "in_client_zq" });
+    let run = serve(
+        launch.path(),
+        &[],
+        true,
+        &[
+            initialize(true),
+            call(1, "tilth_search", &search),
+            roots_answer(client.path()),
+            call(2, "tilth_search", &search),
+        ],
+    );
+    assert!(
+        !run.text(1).contains(OVERVIEW) && run.text(1).contains("0 matches"),
+        "{}",
+        run.text(1)
+    );
+    assert!(
+        run.text(2).starts_with("[tilth] Rust project"),
+        "{}",
+        run.text(2)
+    );
+}
+
+/// With `--scope` the root is known at `initialize`, so the overview stays
+/// in the instructions and no tool result repeats it.
+#[test]
+fn with_a_scope_the_overview_stays_in_the_instructions() {
+    let launch = python_project();
+    let scope = defining("in_scope_zq");
+    let run = serve(
+        launch.path(),
+        &["--scope", scope.path().to_str().unwrap()],
+        true,
+        &[
+            initialize(true),
+            call(1, "tilth_search", &json!({ "query": "in_scope_zq" })),
+        ],
+    );
+    assert!(
+        run.instructions().starts_with("[tilth] Rust project"),
+        "{}",
+        run.instructions()
+    );
+    assert!(!run.text(1).contains(OVERVIEW), "{}", run.text(1));
+}
+
+/// A client without roots leaves the launch directory as the root, so the
+/// overview describes it in the instructions and no tool result repeats it.
+#[test]
+fn without_client_roots_the_overview_stays_in_the_instructions() {
+    let launch = python_project();
+    let run = serve(
+        launch.path(),
+        &[],
+        true,
+        &[
+            initialize(false),
+            call(1, "tilth_search", &json!({ "query": "main" })),
+        ],
+    );
+    assert!(
+        run.instructions().starts_with("[tilth] Python project"),
+        "{}",
+        run.instructions()
+    );
+    assert!(!run.text(1).contains(OVERVIEW), "{}", run.text(1));
 }

@@ -32,8 +32,7 @@ pub struct Config {
     /// How long one batch read in MCP may run. It is checked between files.
     /// `TILTH_BATCH_TIMEOUT`, in seconds.
     pub batch_timeout: Duration,
-    /// Whether the MCP initialize response starts with the project
-    /// fingerprint. `TILTH_NO_OVERVIEW`, set to any value, or the
+    /// Whether an MCP session starts with the project fingerprint. `TILTH_NO_OVERVIEW`, set to any value, or the
     /// `--no-overview` flag turns it off.
     pub overview: bool,
 }
