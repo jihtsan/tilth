@@ -11,6 +11,7 @@ use tilth_core::cache::OutlineCache;
 use tilth_core::error::TilthError;
 use tilth_core::lang::detect_file_type;
 use tilth_core::lang::outline::get_outline_entries;
+use tilth_core::shown;
 use tilth_core::types::{FileType, OutlineEntry, OutlineKind};
 
 use super::apply_budget;
@@ -109,7 +110,7 @@ pub(in crate::mcp) fn tool_read(
             };
             results.push(match read {
                 Ok(output) => output,
-                Err(e) => format!("# {} — error: {}", path.display(), e),
+                Err(e) => format!("# {} — error: {}", shown::path(&path), e),
             });
         }
         // Each file's cost in the joined batch, its separator included.
@@ -874,7 +875,7 @@ mod tests {
             let names = |shown: &[&str]| {
                 shown
                     .iter()
-                    .map(|h| dir.path().join(format!("{h}.js")).display().to_string())
+                    .map(|h| shown::path(&dir.path().join(format!("{h}.js"))).to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             };

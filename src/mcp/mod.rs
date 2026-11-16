@@ -11,6 +11,7 @@ use crate::session::Session;
 use crate::timeout::{spawn_with_timeout, SpawnFailure, ThreadTracker, TimeLimit};
 use tilth_core::cache::OutlineCache;
 use tilth_core::index::bloom::BloomFilterCache;
+use tilth_core::shown;
 
 mod tools;
 pub(crate) mod tree;
@@ -93,11 +94,11 @@ impl Services {
             Err(e) => {
                 let kept = self.root().map_or_else(
                     || "the server has no project root".to_string(),
-                    |r| format!("searches keep resolving against {}", r.display()),
+                    |r| format!("searches keep resolving against {}", shown::path(r)),
                 );
                 let notice = format!(
                     "cannot enter the client's root {}: {e}; {kept}.",
-                    root.display()
+                    shown::path(root)
                 );
                 diag::emit(format_args!("tilth: warning: {notice}"));
                 self.notice = Some(notice.into());
@@ -136,7 +137,7 @@ pub fn run(
         Some(scope) => Ok(readable_dir(&scope).map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("cannot enter scope {}: {e}", scope.display()),
+                format!("cannot enter scope {}: {e}", shown::path(&scope)),
             )
         })?),
         None => launch_dir.map(project_root),
@@ -540,7 +541,7 @@ mod tests {
     fn extract_root_valid_file_uri() {
         // Claude Code sends: {"result":{"roots":[{"uri":"file:///Users/x/project"}]}}
         let tmp = tempfile::tempdir().unwrap();
-        let uri = format!("file://{}", tmp.path().display());
+        let uri = format!("file://{}", tmp.path().to_string_lossy());
         let msg = serde_json::json!({
             "result": { "roots": [{ "uri": uri }] }
         });
@@ -553,8 +554,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let space_dir = tmp.path().join("my project");
         std::fs::create_dir(&space_dir).unwrap();
-        let encoded =
-            format!("file://{}", tmp.path().display()).replace(' ', "%20") + "/my%20project";
+        let encoded = format!("file://{}", tmp.path().to_string_lossy()).replace(' ', "%20")
+            + "/my%20project";
         let msg = serde_json::json!({
             "result": { "roots": [{ "uri": encoded }] }
         });
@@ -588,7 +589,7 @@ mod tests {
     #[test]
     fn extract_root_multiple_roots_takes_first_valid() {
         let tmp = tempfile::tempdir().unwrap();
-        let uri = format!("file://{}", tmp.path().display());
+        let uri = format!("file://{}", tmp.path().to_string_lossy());
         let msg = serde_json::json!({
             "result": { "roots": [
                 { "uri": "file:///nonexistent" },

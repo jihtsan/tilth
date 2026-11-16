@@ -250,7 +250,7 @@ mod tests {
         let all = walk_paths(&scope, None);
         let exts = extensions(&all);
         assert!(exts.contains("rs"), "expected .rs files, got {exts:?}");
-        assert_ne!(all.len(), 0, "no files walked under {}", scope.display());
+        assert_ne!(all.len(), 0, "no files walked under {scope:?}");
     }
 
     #[test]
@@ -374,8 +374,7 @@ mod tests {
             assert_eq!(
                 p.extension().and_then(|e| e.to_str()),
                 Some("rs"),
-                "non-.rs file leaked through whitelist: {}",
-                p.display()
+                "non-.rs file leaked through whitelist: {p:?}"
             );
         }
     }

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use tilth_core::search::walk::WalkConfig;
+use tilth_core::shown;
 
 use crate::diff::DiffSource;
 
@@ -33,14 +34,14 @@ pub(in crate::mcp) fn tool_diff(
             return Err(format!(
                 "relative root \"{}\" cannot anchor the diff: set \"root\" to an absolute \
                  checkout directory (the server cannot see your shell's cwd).",
-                r.display()
+                shown::path(r)
             ));
         }
         if !r.is_dir() {
             return Err(format!(
                 "root \"{}\" is not a valid directory. Set \"root\" to an absolute checkout \
                  directory.",
-                r.display()
+                shown::path(r)
             ));
         }
     }

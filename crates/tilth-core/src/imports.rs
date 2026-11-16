@@ -1115,7 +1115,9 @@ fn resolve_js(dir: &Path, source: &str) -> Option<PathBuf> {
     let base = dir.join(source);
     // Try with extensions
     for ext in &[".ts", ".tsx", ".js", ".jsx"] {
-        let candidate = PathBuf::from(format!("{}{ext}", base.display()));
+        let mut candidate = base.clone().into_os_string();
+        candidate.push(ext);
+        let candidate = PathBuf::from(candidate);
         if candidate.exists() {
             return Some(candidate);
         }
@@ -1315,7 +1317,7 @@ mod tests {
         let content = fs::read_to_string(&file).unwrap();
         resolve_related_files_with_content(&file, &content)
             .iter()
-            .map(|p| p.strip_prefix(root).unwrap().display().to_string())
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
             .collect()
     }
 

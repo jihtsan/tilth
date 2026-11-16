@@ -51,6 +51,7 @@ use classify::classify;
 use config::Config;
 use tilth_core::cache::OutlineCache;
 use tilth_core::search::walk::{Walk, WalkConfig};
+use tilth_core::shown;
 use tilth_core::TilthError;
 use types::QueryType;
 
@@ -77,12 +78,12 @@ pub fn refuse_file_scope(raw: &Path, resolved: &Path, hint: FileScopeHint) -> Re
         return Ok(());
     }
     let dir = match raw.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.display().to_string(),
+        Some(p) if !p.as_os_str().is_empty() => shown::path(p).to_string(),
         _ => ".".to_string(),
     };
     let name = raw.file_name().map_or_else(
-        || raw.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
+        || shown::path(raw).to_string(),
+        |n| shown::path(n).to_string(),
     );
     let fix = match hint {
         FileScopeHint::Glob => format!(
@@ -92,7 +93,7 @@ pub fn refuse_file_scope(raw: &Path, resolved: &Path, hint: FileScopeHint) -> Re
     };
     Err(format!(
         "scope \"{}\" is a file, and scope must be an existing directory. {fix}",
-        raw.display()
+        shown::path(raw)
     ))
 }
 
@@ -164,12 +165,12 @@ fn scope_hint(raw: &Path, resolved: &Path, project: &Path, home: Option<&Path>) 
     if close.is_empty() {
         return format!(
             "The nearest existing directory is \"{}\".",
-            dir_or_cwd(raw_base).display()
+            shown::path(&dir_or_cwd(raw_base))
         );
     }
     let named: Vec<String> = close
         .iter()
-        .map(|rel| format!("\"{}\"", raw_base.join(rel).display()))
+        .map(|rel| format!("\"{}\"", shown::path(&raw_base.join(rel))))
         .collect();
     format!("Did you mean {}?", named.join(" or "))
 }
@@ -755,7 +756,10 @@ mod tests {
         let src = dir.path().join("src");
         assert_eq!(
             hint,
-            format!("The nearest existing directory is \"{}\".", src.display())
+            format!(
+                "The nearest existing directory is \"{}\".",
+                shown::path(&src)
+            )
         );
     }
 
@@ -776,7 +780,7 @@ mod tests {
             hint,
             format!(
                 "The nearest existing directory is \"{}\".",
-                dir.path().display()
+                shown::path(dir.path())
             )
         );
     }
@@ -790,7 +794,7 @@ mod tests {
         let raw = dir.path().join("dosc");
         let nearest = format!(
             "The nearest existing directory is \"{}\".",
-            dir.path().display()
+            shown::path(dir.path())
         );
         assert_eq!(missing_scope_hint(&raw, &raw, Path::new("/")), nearest);
         assert_eq!(
@@ -815,7 +819,7 @@ mod tests {
         let raw = dir.path().join("dosc");
         let hint = missing_scope_hint(&raw, &raw, elsewhere.path());
         let docs = dir.path().join("docs");
-        assert_eq!(hint, format!("Did you mean \"{}\"?", docs.display()));
+        assert_eq!(hint, format!("Did you mean \"{}\"?", shown::path(&docs)));
     }
 
     /// 15 files, each carrying one instance of every query shape that reaches

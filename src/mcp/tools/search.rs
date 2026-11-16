@@ -154,6 +154,7 @@ mod tests {
     use crate::session::Session;
     use tilth_core::cache::OutlineCache;
     use tilth_core::index::bloom::BloomFilterCache;
+    use tilth_core::shown;
 
     /// Regression: `kind=callers` with a comma query must search each target
     /// separately, not for a literal symbol named "alpha,beta". Before the
@@ -572,7 +573,7 @@ mod tests {
         let dir = tmp.path().join("src");
         assert!(
             err.contains("is a file")
-                && err.contains(&format!("(\"{}\")", dir.display()))
+                && err.contains(&format!("(\"{}\")", shown::path(&dir)))
                 && err.contains("glob to its name (\"x.py\")"),
             "refusal must name the directory and glob fix: {err}"
         );

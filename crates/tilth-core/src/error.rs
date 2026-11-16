@@ -6,22 +6,25 @@ use thiserror::Error;
 /// Every error tilth can produce. Displayed as user-facing messages with suggestions.
 #[derive(Debug, Error)]
 pub enum TilthError {
-    #[error("not found: {}{}", path.display(), suggestion.as_deref().map_or(String::new(), |s| format!(" — did you mean: {s}")))]
+    #[error("not found: {}{}", crate::shown::path(path), suggestion.as_deref().map_or(String::new(), |s| format!(" — did you mean: {s}")))]
     NotFound {
         path: PathBuf,
         suggestion: Option<String>,
     },
-    #[error("{} [permission denied]", path.display())]
+    #[error("{} [permission denied]", crate::shown::path(path))]
     PermissionDenied { path: PathBuf },
-    #[error("{} already exists — pass `overwrite: true` to replace it", path.display())]
+    #[error(
+        "{} already exists — pass `overwrite: true` to replace it",
+        crate::shown::path(path)
+    )]
     AlreadyExists { path: PathBuf },
     #[error("invalid query \"{query}\": {reason}")]
     InvalidQuery { query: String, reason: String },
-    #[error("{}: {source}", path.display())]
+    #[error("{}: {source}", crate::shown::path(path))]
     IoError { path: PathBuf, source: io::Error },
-    #[error("parse error in {}: {reason}", path.display())]
+    #[error("parse error in {}: {reason}", crate::shown::path(path))]
     ParseError { path: PathBuf, reason: String },
-    #[error("{} changed on disk while the edit was being applied — re-read the file and retry with the new hashes; nothing was written", path.display())]
+    #[error("{} changed on disk while the edit was being applied — re-read the file and retry with the new hashes; nothing was written", crate::shown::path(path))]
     ConcurrentModification { path: PathBuf },
 }
 
