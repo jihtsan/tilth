@@ -1,6 +1,8 @@
 //! Bash language spec.
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = "(command name: (command_name) @callee)\n";
 
@@ -17,6 +19,10 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: false,
     hash_comments: true,
+    names: NameRule {
+        letters: &['-'],
+        marks: &[],
+    },
     strip_family: Some(StripFamily::Bash),
     extract_receiver: None,
     callee_filter: None,

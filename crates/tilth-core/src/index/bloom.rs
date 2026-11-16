@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use fastbloom::BloomFilter;
 
 use crate::lang::detect_file_type;
+use crate::lang::spec::NameRule;
 use crate::types::{FileType, Lang};
 
 // ---------------------------------------------------------------------------
@@ -176,7 +177,10 @@ fn build_filter(content: &str, lang: Option<Lang>) -> BloomFilter {
 /// Extract identifier tokens from source code using a simple byte-level
 /// state machine. Skips string literals and block/line comments.
 ///
-/// An identifier is `[a-zA-Z_][a-zA-Z0-9_]*`.
+/// An identifier is a name by the language's [`NameRule`], the rule its
+/// grammar reads names by, so the filter holds every name a parse of the
+/// file can find (`save!` in Ruby, `größe` in Python). A file in no known
+/// language is read by [`NameRule::PLAIN`].
 ///
 /// This is intentionally approximate -- it does not understand all language
 /// syntaxes perfectly, but is fast and good enough for Bloom filter population.
@@ -216,8 +220,11 @@ struct IdentifierIter<'a> {
     pos: usize,
     state: ScanState,
     lang: Option<Lang>,
+    names: NameRule,
     triple_quotes: bool,
     hash_comments: bool,
+    /// The name just returned without its trailing mark, returned next.
+    pending: Option<&'a str>,
 }
 
 impl<'a> IdentifierIter<'a> {
@@ -228,9 +235,31 @@ impl<'a> IdentifierIter<'a> {
             pos: 0,
             state: ScanState::Code,
             lang,
+            names: lang.map_or(NameRule::PLAIN, Lang::names),
             triple_quotes: lang.is_some_and(Lang::has_triple_quoted_strings),
             hash_comments: lang.is_some_and(Lang::has_hash_comments),
+            pending: None,
         }
+    }
+
+    /// Read the name that starts at `start`, leaving `pos` after it. A name
+    /// that ends in a mark is returned with it, and the next call returns it
+    /// without: the mark may be the first character of an operator
+    /// (`count!=0`), which only a parser can tell.
+    fn read_name(&mut self, start: usize) -> &'a str {
+        let src = self.src;
+        let names = self.names;
+        let end = src[start..]
+            .char_indices()
+            .skip(1)
+            .find(|&(_, c)| !names.continues(c))
+            .map_or(src.len(), |(at, _)| start + at);
+        self.pos = end;
+        if let Some(mark) = src[end..].chars().next().filter(|&c| names.ends(c)) {
+            self.pending = Some(&src[start..end]);
+            self.pos += mark.len_utf8();
+        }
+        &src[start..self.pos]
     }
 }
 
@@ -239,6 +268,9 @@ impl<'a> Iterator for IdentifierIter<'a> {
 
     #[expect(clippy::too_many_lines, reason = "split by responsibility in #315")]
     fn next(&mut self) -> Option<&'a str> {
+        if let Some(bare) = self.pending.take() {
+            return Some(bare);
+        }
         let bytes = self.bytes;
         let len = bytes.len();
 
@@ -270,8 +302,8 @@ impl<'a> Iterator for IdentifierIter<'a> {
                     if b == b'#'
                         && self.hash_comments
                         && (i == 0
-                            || !(is_ident_continue(bytes[i - 1])
-                                || matches!(bytes[i - 1], b'$' | b'{' | b'?' | b'\\')))
+                            || !(bytes[i - 1].is_ascii_alphanumeric()
+                                || matches!(bytes[i - 1], b'_' | b'$' | b'{' | b'?' | b'\\')))
                         && !(i + 1 < len && bytes[i + 1] == b'[')
                     {
                         self.state = ScanState::LineComment;
@@ -297,10 +329,12 @@ impl<'a> Iterator for IdentifierIter<'a> {
                         // single-quoted string, so the heuristic is gated on
                         // `has_lifetimes` to avoid swallowing identifiers after a
                         // `'foo'` string there.
+                        let tick = self.src.get(i + 1..).and_then(|rest| rest.chars().next());
                         let is_lifetime = self.lang.is_some_and(Lang::has_lifetimes)
-                            && i + 1 < len
-                            && is_ident_start(bytes[i + 1])
-                            && !(i + 2 < len && bytes[i + 2] == b'\'');
+                            && tick.is_some_and(|c| {
+                                self.names.starts(c)
+                                    && bytes.get(i + 1 + c.len_utf8()) != Some(&b'\'')
+                            });
                         if is_lifetime {
                             self.pos += 1;
                             continue;
@@ -329,18 +363,22 @@ impl<'a> Iterator for IdentifierIter<'a> {
                         }
                     }
 
-                    // Check for start of identifier
-                    if is_ident_start(b) {
-                        let start = i;
+                    // A name, or a character to step over. In code the scan
+                    // stops only on a character boundary; stepping one byte
+                    // keeps a position inside a character total.
+                    let at = if b.is_ascii() {
+                        Some(char::from(b))
+                    } else {
+                        self.src.get(i..).and_then(|rest| rest.chars().next())
+                    };
+                    let Some(c) = at else {
                         self.pos += 1;
-                        while self.pos < len && is_ident_continue(bytes[self.pos]) {
-                            self.pos += 1;
-                        }
-                        // Safety: identifiers are pure ASCII, so byte slicing is valid UTF-8
-                        return Some(&self.src[start..self.pos]);
+                        continue;
+                    };
+                    if self.names.starts(c) {
+                        return Some(self.read_name(i));
                     }
-
-                    self.pos += 1;
+                    self.pos += c.len_utf8();
                 }
 
                 ScanState::StringDouble => {
@@ -407,16 +445,6 @@ impl<'a> Iterator for IdentifierIter<'a> {
 
         None
     }
-}
-
-#[inline]
-fn is_ident_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
-}
-
-#[inline]
-fn is_ident_continue(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +853,46 @@ mod tests {
         let idents: Vec<&str> = extract_identifiers(src, Some(Lang::Php)).collect();
         assert!(idents.contains(&"Route"), "got {idents:?}");
         assert!(idents.contains(&"after"), "got {idents:?}");
+    }
+
+    /// Each name is one token, spelled as its language spells it (#375).
+    #[test]
+    fn a_name_is_read_by_its_languages_rule() {
+        for (lang, src, name) in [
+            (Lang::Ruby, "order.persist!\n", "persist!"),
+            (Lang::Ruby, "raise unless ok?\n", "ok?"),
+            (Lang::Elixir, "order = fetch!(id)\n", "fetch!"),
+            (Lang::Python, "return größe()\n", "größe"),
+            (Lang::Rust, "let n = größe();\n", "größe"),
+            (Lang::JavaScript, "return $http();\n", "$http"),
+            (Lang::Java, "run$();\n", "run$"),
+            (Lang::Bash, "main() {\n  my-helper\n}\n", "my-helper"),
+        ] {
+            let idents: Vec<&str> = extract_identifiers(src, Some(lang)).collect();
+            assert!(
+                idents.contains(&name),
+                "{lang:?}: {name:?} not in {idents:?}"
+            );
+        }
+    }
+
+    /// A trailing mark may be an operator's first character (`count!=0`),
+    /// which only a parser can tell, so the name is held both with and
+    /// without it. A mark is never a name of its own.
+    #[test]
+    fn a_name_with_a_trailing_mark_is_also_held_without_it() {
+        let idents: Vec<&str> = extract_identifiers("x = count!=0\n", Some(Lang::Ruby)).collect();
+        assert_eq!(idents, ["x", "count!", "count"]);
+    }
+
+    /// The marks and extra characters are one language's: `$` is a sigil in
+    /// PHP, and `!` is a Rust macro's, not part of its name.
+    #[test]
+    fn another_languages_name_characters_split_a_name() {
+        let php: Vec<&str> = extract_identifiers("$order->save();\n", Some(Lang::Php)).collect();
+        assert_eq!(php, ["order", "save"]);
+        let rust: Vec<&str> = extract_identifiers("validate!(x);\n", Some(Lang::Rust)).collect();
+        assert_eq!(rust, ["validate", "x"]);
     }
 
     #[test]

@@ -132,7 +132,7 @@ pub fn analyze_deps(
             // is used as `parsePlan`. Other export entries (`export * from`,
             // `export default <expr>`) name nothing.
             OutlineKind::Export => {
-                if entry.signature.is_some() && is_identifier(&entry.name) {
+                if entry.signature.is_some() && lang.names().is_name(&entry.name) {
                     all_names.push(entry.name.clone());
                 }
             }
@@ -656,14 +656,6 @@ fn module_name(path: &Path) -> Option<&str> {
     name?.to_str()
 }
 
-/// A name a call can spell: letters, digits, `_` and `$`.
-fn is_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -875,6 +867,54 @@ mod tests {
         assert_eq!(
             found,
             [("use.ts".to_string(), vec!["parsePlan".to_string()], None)]
+        );
+    }
+
+    /// A name with a non-ASCII letter is found both ways: the file that
+    /// calls it is a dependent, and the file it comes from is a local use
+    /// that names it (#375). An export clause names it too.
+    #[test]
+    fn a_name_with_a_non_ascii_letter_is_a_dependency_both_ways() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root, "lib.py", "def größe():\n    return 1\n");
+        write(
+            &root,
+            "main.py",
+            "from lib import größe\n\n\ndef main():\n    return größe()\n",
+        );
+        assert_eq!(
+            dependents_of(&root, "lib.py"),
+            [("main.py".to_string(), vec!["größe".to_string()], None)]
+        );
+        let bloom = crate::index::bloom::BloomFilterCache::new();
+        let result =
+            analyze_deps(&root.join("main.py"), &root, &bloom, WalkConfig::default()).unwrap();
+        let local: Vec<(&Path, &[String])> = result
+            .uses_local
+            .iter()
+            .map(|d| (d.path.as_path(), d.symbols.as_slice()))
+            .collect();
+        assert_eq!(
+            local,
+            [(root.join("lib.py").as_path(), &["größe".to_string()][..])]
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(
+            &root,
+            "plan.ts",
+            "function readPlan() { return 1; }\nexport { readPlan as größe };\n",
+        );
+        write(
+            &root,
+            "use.ts",
+            "import { größe } from \"./plan\";\ngröße();\n",
+        );
+        assert_eq!(
+            dependents_of(&root, "plan.ts"),
+            [("use.ts".to_string(), vec!["größe".to_string()], None)]
         );
     }
 
