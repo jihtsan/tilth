@@ -22,11 +22,24 @@ jobs:
       - run: rustup component add clippy rustfmt
       - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # ratchet:Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The panic-probe feature adds code only, so linting with it on covers
+      # the build without it too.
+      - run: cargo clippy --locked --workspace --all-targets --features tilth/panic-probe -- -D warnings
       - run: cargo test --locked --workspace
       # tilth-core must package on its own: tilth depends on it by version, so
       # a release publishes it to crates.io first.
       - run: cargo publish --dry-run --locked -p tilth-core
+
+  # The release profile ships, and its panic strategy decides whether the
+  # MCP server survives a panic in a tool call. Only this job builds that
+  # profile, for the one test that checks it.
+  release-panic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # ratchet:Swatinem/rust-cache@v2
+      - run: cargo test --locked --release --features panic-probe --test mcp_panic
 
   markdown:
     runs-on: ubuntu-latest

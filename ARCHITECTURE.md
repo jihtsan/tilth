@@ -1109,6 +1109,12 @@ runs on an abandonable worker with whatever time is left. What bounds
 the write itself is its input: at most 20 files, each read, verified,
 rewritten and parsed, with no walk of the tree.
 
+A call that panics is caught, on its worker or around the write on the
+main loop, and gets the error result "tool panicked during execution";
+the server goes on. That needs panics to unwind, so the release profile
+keeps Rust's default, and `tests/mcp_panic.rs` checks both paths and the
+start-up overview in that profile.
+
 **Tool definitions.** `tool_definitions(edit_mode)` returns the schemas
 emitted at `tools/list`. These are the canonical source for argument
 shapes; the in-process `dispatch_tool` and the per-tool functions
