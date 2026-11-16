@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use streaming_iterator::StreamingIterator;
@@ -71,7 +71,7 @@ pub fn extract_callee_names(
 
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), content_bytes);
-    let mut names: Vec<String> = Vec::new();
+    let mut names: BTreeSet<String> = BTreeSet::new();
 
     while let Some(m) = matches.next() {
         for cap in m.captures() {
@@ -89,19 +89,26 @@ pub fn extract_callee_names(
                 }
             }
 
-            // Some patterns match more than a call (see `callee_filter`).
-            if callee_filter.is_some_and(|keep| !keep(&cap.node)) {
+            let Ok(text) = cap.node.utf8_text(content_bytes) else {
+                continue;
+            };
+
+            // A name already found needs no second look, and the filter's
+            // look is not free (Ruby's walks back through the scope).
+            if names.contains(text) {
                 continue;
             }
 
-            if let Ok(text) = cap.node.utf8_text(content_bytes) {
-                names.push(text.to_string());
+            // Some patterns match more than a call (see `callee_filter`).
+            if callee_filter.is_some_and(|keep| !keep(&cap.node, content_bytes)) {
+                continue;
             }
+
+            names.insert(text.to_string());
         }
     }
 
-    names.sort();
-    names.dedup();
+    let mut names: Vec<String> = names.into_iter().collect();
 
     // Elixir: the callee query `(call target: (identifier) @callee)` also captures
     // definition keywords (def, defmodule, etc.) and import keywords (use, import,
@@ -457,6 +464,27 @@ mod tests {
         );
     }
 
+    /// A definition's head is a `call` node to tree-sitter-elixir, so the
+    /// function a range defines once counted among the functions it calls
+    /// (#377). A recursive call in the body still counts.
+    #[test]
+    fn an_elixir_definition_head_is_not_its_own_callee() {
+        let elixir = "defmodule M do\n\
+                      \x20 def run(x) when is_map(x) do\n\
+                      \x20   x |> build() |> run()\n\
+                      \x20 end\n\
+                      \x20 def build(x), do: x\n\
+                      end\n";
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((2, 4))),
+            ["build", "is_map", "run"]
+        );
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((5, 5))),
+            Vec::<String>::new()
+        );
+    }
+
     /// An attribute's argument list is a `token_tree` as well, and the
     /// expressions in one do run — thiserror compiles `#[error(..)]` arguments
     /// into `Display`. Reaching them is deliberate; the cost is that `cfg`
@@ -561,6 +589,57 @@ end
         assert!(
             names.contains(&"map".to_string()),
             "expected map from Enum.map pipe, got: {names:?}"
+        );
+    }
+
+    /// A bare Ruby name calls a method unless something earlier in its scope
+    /// binds it, in any of the ways Ruby binds a local. A block's own
+    /// bindings end with the block, a name read before its assignment is
+    /// still a call, and a block's implicit `it` and `_1` are not (#376).
+    #[test]
+    fn extract_ruby_callee_names_without_parentheses() {
+        let ruby = r"def report(rows, limit = page_size, *rest, key:, **opts, &blk)
+  title = heading
+  rows.each { |row; seen| seen = row; format row }
+  fmt = ->(cell) { cell.to_s + suffix }
+  first, (second, third) = rows
+  begin
+    risky
+  rescue => error
+    log error
+  end
+  for item in rows do item end
+  case rows
+  in [head, *tail] then head
+  in {name:} then name
+  in Integer => count then count
+  end
+  rows => {size:}
+  total = total
+  rows.map { it.to_s + _1 }
+  it
+  [title, limit, rest, key, opts, blk, fmt, first, second, third, tail, size, seen, row, cell, later]
+  later = 1
+end
+";
+        assert_eq!(
+            extract_callee_names(ruby, Lang::Ruby, None),
+            [
+                "cell",
+                "each",
+                "format",
+                "heading",
+                "it",
+                "later",
+                "log",
+                "map",
+                "page_size",
+                "risky",
+                "row",
+                "seen",
+                "suffix",
+                "to_s"
+            ]
         );
     }
 }

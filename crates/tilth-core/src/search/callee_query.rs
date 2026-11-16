@@ -6,7 +6,9 @@
 use crate::types::Lang;
 
 /// Return the tree-sitter query string for extracting callee names in the given language.
-/// Each language has patterns targeting `@callee` captures on call-like expressions.
+/// Each language has patterns targeting `@callee` captures on call-like
+/// expressions. Where a pattern matches more than a call (Rust's token trees,
+/// Ruby's bare identifiers), the spec's `callee_filter` rejects the rest.
 pub(super) fn callee_query_str(lang: Lang) -> Option<&'static str> {
     crate::lang::spec::spec(lang).callee_query
 }
