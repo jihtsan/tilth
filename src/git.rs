@@ -96,6 +96,15 @@ impl<'a> Git<'a> {
     /// Run git and return what it printed on stdout.
     pub(crate) fn run(&self) -> Result<String, GitError> {
         let command = self.command;
+        // A deadline already past leaves no time to run anything, however
+        // fast git would be: deciding before the spawn keeps the outcome
+        // independent of how quickly git exits.
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(GitError::TimedOut { command });
+        }
         let io = |source| GitError::Io { command, source };
         let child = self.to_command().spawn().map_err(io)?;
         let output = match self.deadline {
