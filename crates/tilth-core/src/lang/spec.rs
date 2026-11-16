@@ -20,6 +20,10 @@ use crate::types::Lang;
 /// the file's path, and the search scope that path is judged relative to.
 pub type TestSiteFn = fn(&tree_sitter::Node, &[u8], &Path, &Path) -> bool;
 
+/// Signature of [`LangSpec::callee_filter`]: the captured node and the file's
+/// bytes.
+pub type CalleeFilterFn = fn(&tree_sitter::Node, &[u8]) -> bool;
+
 /// All per-language data and behavior in one record. Read via `spec(lang)`.
 pub struct LangSpec {
     /// Human-readable language name (`lang_display_name`).
@@ -56,9 +60,10 @@ pub struct LangSpec {
     pub strip_family: Option<StripFamily>,
     /// Go-only: extract the method receiver name from file content.
     pub extract_receiver: Option<fn(&str, &tree_sitter::Language) -> Option<String>>,
-    /// Rust-only: reject a `@callee` capture that `callee_query` matched too
-    /// loosely. Consumers of the capture apply it when present.
-    pub callee_filter: Option<fn(&tree_sitter::Node) -> bool>,
+    /// Rust and Ruby: reject a `@callee` capture that `callee_query` matched
+    /// too loosely, given the file's bytes. Consumers of the capture apply it
+    /// when present.
+    pub callee_filter: Option<CalleeFilterFn>,
     /// Rust-only: whether a call site is test code by a signal only the source
     /// carries — a `#[test]` function, a `#[cfg(test)]` module, or a file under
     /// a `tests` directory. Languages whose tests `is_test_file` recognises
@@ -405,13 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn only_rust_filters_callee_captures() {
+    fn only_rust_and_ruby_filter_callee_captures() {
         for &lang in mod_all_langs_for_test() {
             assert_eq!(
                 spec(lang).callee_filter.is_some(),
-                matches!(lang, Lang::Rust),
-                "{lang:?} callee-filter presence mismatch — only Rust's callee \
-                 query has a pattern loose enough to need one"
+                matches!(lang, Lang::Rust | Lang::Ruby),
+                "{lang:?} callee-filter presence mismatch — only Rust's and \
+                 Ruby's callee queries have a pattern loose enough to need one"
             );
         }
     }

@@ -359,7 +359,7 @@ fn find_callers_treesitter_batch(
             }
 
             // Some patterns match more than a call (see `callee_filter`).
-            if callee_filter.is_some_and(|keep| !keep(&cap.node)) {
+            if callee_filter.is_some_and(|keep| !keep(&cap.node, content_bytes)) {
                 continue;
             }
 
@@ -566,6 +566,39 @@ mod tests {
                 caller_labels(file, source, target),
                 labels(want),
                 "{file}: {target}"
+            );
+        }
+    }
+
+    /// Ruby calls a method without parentheses: `subtotal + tax`,
+    /// `compute_tax subtotal`. The grammar reads such a call as a bare
+    /// `identifier`, the same node as a local variable, so only Ruby's own
+    /// rule tells them apart: a name is a local after something in its scope
+    /// binds it (an assignment, a parameter, a pattern), and a method call
+    /// everywhere else (#376).
+    #[test]
+    fn ruby_calls_without_parentheses_are_call_sites() {
+        let ruby = "class Order\n  def subtotal\n    10\n  end\n\n  \
+                    def total\n    subtotal + tax\n  end\n\n  \
+                    def tax\n    compute_tax subtotal\n  end\n\n  \
+                    def compute_tax(subtotal)\n    subtotal * 0.2\n  end\n\n  \
+                    def late\n    subtotal\n    subtotal = 1\n    subtotal\n  end\n\n  \
+                    def each_tax(lines)\n    lines.map { |subtotal| subtotal }\n    \
+                    lines.each { tax }\n  end\n\n  \
+                    def matched(order)\n    case order\n    in {subtotal:} then subtotal\n    \
+                    end\n  end\nend\n";
+        for (target, want) in [
+            (
+                "subtotal",
+                &[(7, "Order.total"), (11, "Order.tax"), (19, "Order.late")][..],
+            ),
+            ("tax", &[(7, "Order.total"), (26, "Order.each_tax")]),
+            ("compute_tax", &[(11, "Order.tax")]),
+        ] {
+            assert_eq!(
+                caller_labels("order.rb", ruby, target),
+                labels(want),
+                "{target}"
             );
         }
     }
