@@ -65,7 +65,10 @@ pub(crate) fn binary_summary(byte_len: u64, mime: &str) -> String {
     format!("binary, {size_str}, {mime}")
 }
 
-/// Build header for search results.
+/// Build header for search results. `by_qualified_text` says the usages are
+/// the lines that spell a qualified query (`Engine::run`); the line under the
+/// usage count then says that calls through a receiver are not among them,
+/// and that callers, which matches them by the bare name, finds them.
 pub fn search_header(
     query: &str,
     scope: &Path,
@@ -73,6 +76,7 @@ pub fn search_header(
     total: usize,
     defs: usize,
     usages: usize,
+    by_qualified_text: bool,
 ) -> String {
     // When the display cap bit, say so — a bare capped count reads as a
     // complete result and silently under-reports (the #51 bug).
@@ -90,7 +94,16 @@ pub fn search_header(
             noun(u, "usage", "usages")
         ),
     };
-    format!("# Search: \"{query}\" in {} — {parts}", scope.display())
+    let header = format!("# Search: \"{query}\" in {} — {parts}", scope.display());
+    // Only a header with a definition states a usage count.
+    if !by_qualified_text || defs == 0 {
+        return header;
+    }
+    let name = tilth_core::search::scope::split_qualified(query).1;
+    format!(
+        "{header}\n> Usages match the text `{query}`, not calls through a receiver; \
+         callers finds those by the name `{name}`."
+    )
 }
 
 /// Human-readable file size. Integer math only — no floats.
@@ -206,7 +219,7 @@ mod tests {
         let header = file_header(Path::new("a.rs"), 0, 0, ViewMode::Full);
         assert_eq!(header, "# a.rs (0 lines, ~0 tokens) [full]");
 
-        let search = search_header("q", Path::new("src"), 1, 1, 1, 0);
+        let search = search_header("q", Path::new("src"), 1, 1, 1, 0, false);
         assert_eq!(
             search,
             "# Search: \"q\" in src — 1 match (1 definition, 0 usages)"
@@ -254,18 +267,18 @@ mod tests {
         let scope = Path::new("src");
         // Nothing hidden — the bare total, exactly as before.
         assert_eq!(
-            search_header("handleAuth", scope, 6, 6, 2, 4),
+            search_header("handleAuth", scope, 6, 6, 2, 4, false),
             "# Search: \"handleAuth\" in src — 6 matches (2 definitions, 4 usages)"
         );
         // Capped — the shown count is qualified by the real total, and the
         // definition/usage breakdown still describes the whole result set.
         assert_eq!(
-            search_header("handleAuth", scope, 10, 42, 2, 40),
+            search_header("handleAuth", scope, 10, 42, 2, 40, false),
             "# Search: \"handleAuth\" in src — 10 of 42 matches (2 definitions, 40 usages)"
         );
         // Content/regex results report no definitions — count only.
         assert_eq!(
-            search_header("needle", scope, 10, 15, 0, 15),
+            search_header("needle", scope, 10, 15, 0, 15, false),
             "# Search: \"needle\" in src — 10 of 15 matches"
         );
     }

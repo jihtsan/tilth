@@ -515,9 +515,12 @@ The biggest production-only file in the subsystem. Three layers stacked:
      any owner, and never a definition with none. A top-level definition also matches when the qualifier
      names its module (`scope::names_module`: the file's stem, its
      directory, or a Go package clause), as in `gin.New`. Its usages are
-     the qualified text itself. When nothing matches, the definitions
-     other owners hold come back in `other_owners`; grok lists them, and
-     search notes them when one of them has an owner.
+     the qualified text itself, so a call through a receiver (`e.run()`)
+     is not one; `usages_by_qualified_text` puts a line under the
+     header's usage count that says so and points at callers. When
+     nothing matches, the definitions other owners hold come back in
+     `other_owners`; grok lists them, and search notes them when one of
+     them has an owner.
    - `find_defs_heuristic_buf` is a regex-free fallback for languages
      without grammars (Dockerfile, Make).
    - `find_defs_markdown_buf` handles ATX headings as
