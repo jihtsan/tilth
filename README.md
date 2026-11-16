@@ -123,7 +123,7 @@ See what a file uses and what uses it. This is worth a look before you rename or
 
 ```
 $ tilth recovery.go --deps
-# Deps: recovery.go — 5 local, 0 external, 3 dependents
+# Deps: recovery.go — 5 local, 1 external, 3 dependents
 
 ## Uses (local)
 context.go                     Abort, AbortWithStatus, Error, Next
@@ -132,15 +132,20 @@ fs.go                          Open
 gin.go                         New
 routergroup.go                 handle
 
+## Uses (external)
+github.com/gin-gonic/gin/internal/bytesconv
+
 ## Used by
-benchmarks_test.go:22          BenchmarkRecoveryMiddleware → Recovery
+gin.go:239                     Default              → Recovery (same package)
+
+## Used by (tests)
+benchmarks_test.go:22          BenchmarkRecoveryMiddleware → Recovery (same package)
 benchmarks_test.go:36          BenchmarkManyHandlers → Recovery
-gin.go:239                     Default              → Recovery
-recovery_test.go:22            TestPanicClean       → RecoveryWithWriter
+recovery_test.go:22            TestPanicClean       → RecoveryWithWriter (same package)
 ...
 ```
 
-"Used by" lists the files that call the file's names, and the files that import it without a call (`imports it`), also through a re-exporting `index.ts` or `__init__.py` (`imports it through …`). It lists the first 15 dependents and counts the rest. `--full` lists them all. The header counts the dependents found by a call alone, with no import of the file (`3 dependents, 1 of them by name only`), since such a call may reach another function of the same name.
+"Used by" lists the files that call the file's names, and the files that import it without a call (`imports it`), also through a re-exporting `index.ts` or `__init__.py` (`imports it through …`). The dependents an import confirms come first, marked `imports it` on their first row, together with the files in the file's package, which reach it without an import (`same package`: a Go file of its directory with the same `package` clause, or a Java, Kotlin or Scala file that declares the same package). Then come the dependents found by a call alone, marked `by name`, since such a call may reach another function of the same name. It lists the first 15 confirmed dependents and the first 5 found by name, and counts the rest. Where no import tilth resolves can name the file, it lists every dependent found by name, since nothing tells them from real ones: in Go, Java, Kotlin, Scala, Ruby, PHP, C#, Swift and Elixir, and for a C or C++ source file, which an include never names. `--full` lists them all, and so does `full` on `tilth_deps`. The header counts the dependents found by name (`3 dependents, 1 of them by name only`), and the note under it stays under any budget.
 
 In MCP mode, use the `tilth_deps` tool.
 

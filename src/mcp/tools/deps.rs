@@ -26,6 +26,7 @@ pub(in crate::mcp) fn tool_deps(
         .get("budget")
         .and_then(serde_json::Value::as_u64)
         .map(|b| b as usize);
+    let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
 
     let deps_result =
         tilth_core::analyze_deps(&path, &scope, bloom, walk).map_err(|e| e.to_string())?;
@@ -34,7 +35,7 @@ pub(in crate::mcp) fn tool_deps(
         &deps_result,
         &scope,
         budget,
-        false,
+        full,
     ));
     Ok(output)
 }
@@ -97,6 +98,40 @@ mod tests {
             err.contains("relative scope") && err.contains("root"),
             "explicit relative scope without root must refuse: {err}"
         );
+    }
+
+    /// The output counts the dependents past the cap, and `full` lists
+    /// them, as the CLI's `--full` does; the tool had no way to.
+    #[test]
+    fn full_lists_the_dependents_past_the_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("lib.rs");
+        std::fs::write(&target, "pub fn shared_helper() {}\n").unwrap();
+        for i in 0..7 {
+            let user = format!("fn user{i}() {{ shared_helper(); }}\n");
+            std::fs::write(tmp.path().join(format!("user{i}.rs")), user).unwrap();
+        }
+        let rows = |out: &str| out.lines().filter(|l| l.starts_with("user")).count();
+        let args =
+            |full: bool| serde_json::json!({ "path": target.to_str().unwrap(), "full": full });
+        let capped = tool_deps(
+            &args(false),
+            &bloom(),
+            WalkConfig::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(rows(&capped), 5, "{capped}");
+        assert!(capped.contains("... and 2 more by name only"), "{capped}");
+        let full = tool_deps(
+            &args(true),
+            &bloom(),
+            WalkConfig::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(rows(&full), 7, "{full}");
+        assert!(!full.contains("more by name only"), "{full}");
     }
 
     /// #195: a file passed as `scope` used to fall back to the whole root.

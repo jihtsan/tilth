@@ -174,6 +174,11 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                         "type": "number",
                         "description": "Max tokens. Truncates 'Used by' first."
                     },
+                    "full": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "List every dependent in 'Used by', where the default stops at a cap and counts the rest."
+                    },
                     "root": {
                         "type": "string",
                         "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
