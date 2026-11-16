@@ -776,7 +776,7 @@ mod tests {
 
     /// One `tools/call` through the server's own handler: the result's text
     /// and whether it is an error.
-    fn call_tool(services: &Services, name: &str, arguments: Value) -> (String, bool) {
+    fn call_tool(services: &Services, name: &str, arguments: &Value) -> (String, bool) {
         let req = JsonRpcRequest {
             _jsonrpc: "2.0".into(),
             id: Some(1.into()),
@@ -816,7 +816,7 @@ mod tests {
         let append = serde_json::json!({
             "files": [{ "path": "t.txt", "mode": "append", "content": "two\n" }],
         });
-        let (text, is_error) = call_tool(&services, "tilth_write", append);
+        let (text, is_error) = call_tool(&services, "tilth_write", &append);
         assert!(
             !is_error,
             "a write that landed was reported as failed:\n{text}"
@@ -830,7 +830,7 @@ mod tests {
         let edit = serde_json::json!({
             "files": [{ "path": "t.txt", "edits": [{ "start": anchor, "content": "three" }] }],
         });
-        let (text, is_error) = call_tool(&services, "tilth_write", edit);
+        let (text, is_error) = call_tool(&services, "tilth_write", &edit);
         assert!(!is_error, "{text}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\nthree\n");
     }
@@ -863,7 +863,7 @@ mod tests {
                     }],
                 }],
             });
-            let (text, is_error) = call_tool(&services(dir.path()), "tilth_write", edit);
+            let (text, is_error) = call_tool(&services(dir.path()), "tilth_write", &edit);
             assert!(!is_error, "{text}");
             assert!(
                 std::fs::read_to_string(&lib)
