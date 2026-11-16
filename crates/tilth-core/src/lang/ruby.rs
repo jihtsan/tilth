@@ -78,7 +78,7 @@ fn binds(node: Node) -> bool {
 }
 
 /// The nearest ancestor of `node` whose kind `starts_scope`, or the root.
-fn scope_of<'t>(node: Node<'t>, starts_scope: impl Fn(&str) -> bool) -> Node<'t> {
+fn scope_of(node: Node<'_>, starts_scope: impl Fn(&str) -> bool) -> Node<'_> {
     let mut scope = node;
     while let Some(parent) = scope.parent() {
         scope = parent;

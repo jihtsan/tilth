@@ -577,7 +577,7 @@ end
     /// still a call, and a block's implicit `it` and `_1` are not (#376).
     #[test]
     fn extract_ruby_callee_names_without_parentheses() {
-        let ruby = r#"def report(rows, limit = page_size, *rest, key:, **opts, &blk)
+        let ruby = r"def report(rows, limit = page_size, *rest, key:, **opts, &blk)
   title = heading
   rows.each { |row; seen| seen = row; format row }
   fmt = ->(cell) { cell.to_s + suffix }
@@ -600,7 +600,7 @@ end
   [title, limit, rest, key, opts, blk, fmt, first, second, third, tail, size, seen, row, cell, later]
   later = 1
 end
-"#;
+";
         assert_eq!(
             extract_callee_names(ruby, Lang::Ruby, None),
             [
