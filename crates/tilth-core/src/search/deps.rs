@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::TilthError;
-use crate::imports::{is_external, references, Reference};
+use crate::imports::{
+    can_be_imported, declared_package, is_external, references, resolves_imports, Reference,
+};
 use crate::lang::detect_file_type_with_content;
 use crate::lang::outline::get_outline_entries;
 use crate::search::callees::{extract_callee_names, resolve_callees};
@@ -42,6 +44,11 @@ pub struct DepsResult {
     /// more than `MAX_EXPORTED_SYMBOLS` (see there for the order). Empty
     /// when every name was searched.
     pub unsearched: Vec<String>,
+    /// Whether an import tilth resolves can name the target, so a
+    /// dependent no import confirms is one found by name only. Where none
+    /// can (Go, Java, a C source file), nothing tells a dependent found by
+    /// name from a real one.
+    pub importable: bool,
 }
 
 /// A local file dependency with the symbols used from it.
@@ -66,6 +73,11 @@ pub struct Dependent {
     /// re-exports it (`index.ts`, `__init__.py`, `export … from`). `None`
     /// when the file imports the target itself, or only calls it.
     pub via: Option<PathBuf>,
+    /// The file is in the target's package, so it reaches the target's
+    /// names without an import: in Go, a file of the same directory with
+    /// the same `package` clause; in Java, Kotlin and Scala, a file of any
+    /// of the three that declares the same package.
+    pub same_package: bool,
 }
 
 /// Analyse the dependency graph for `path` within `scope`, walking it as
@@ -116,6 +128,7 @@ pub fn analyze_deps(
             skipped_large: Vec::new(),
             exported_count: 0,
             unsearched: Vec::new(),
+            importable: false,
         });
     };
 
@@ -242,6 +255,7 @@ pub fn analyze_deps(
                 is_test,
                 import_lines: Vec::new(),
                 via: None,
+                same_package: false,
             })
         })?;
         let by_path: HashMap<PathBuf, Dependent> = found
@@ -275,12 +289,19 @@ pub fn analyze_deps(
                 symbols: Vec::new(),
                 import_lines: Vec::new(),
                 via: None,
+                same_package: false,
             });
         dependent.import_lines.extend(importer.lines);
         dependent.import_lines.sort_unstable();
         dependent.import_lines.dedup();
         if dependent.via.is_none() {
             dependent.via = importer.via;
+        }
+    }
+
+    if let Some(package) = declared_package(&content, lang) {
+        for dependent in found_by_path.values_mut() {
+            dependent.same_package = in_package(&dependent.path, path, lang, &package);
         }
     }
 
@@ -304,7 +325,26 @@ pub fn analyze_deps(
         skipped_large,
         exported_count,
         unsearched,
+        importable: can_be_imported(path, lang),
     })
+}
+
+/// Whether `file` is in `package`, the one `target`, of `lang`, declares:
+/// for Go, in the target's directory; for Java, Kotlin and Scala, anywhere,
+/// since the three share packages on the JVM.
+fn in_package(file: &Path, target: &Path, lang: Lang, package: &str) -> bool {
+    let jvm = |l: Lang| matches!(l, Lang::Java | Lang::Kotlin | Lang::Scala);
+    let Ok(Some(content)) = crate::source::read_source(file) else {
+        return false;
+    };
+    let FileType::Code(file_lang) = detect_file_type_with_content(file, &content) else {
+        return false;
+    };
+    let shares = match lang {
+        Lang::Go => file_lang == Lang::Go && file.parent() == target.parent(),
+        _ => jvm(lang) && jvm(file_lang),
+    };
+    shares && declared_package(&content, file_lang).as_deref() == Some(package)
 }
 
 /// A file found to import one of the files it was searched for.
@@ -474,20 +514,11 @@ fn imports_one_of(
     keep: &(dyn Fn(&str) -> bool + Sync),
     through: bool,
 ) -> ImportScan {
-    let importable = matches!(
+    let resolvable = matches!(
         crate::lang::detect_file_type(file),
-        FileType::Code(
-            Lang::Rust
-                | Lang::TypeScript
-                | Lang::Tsx
-                | Lang::JavaScript
-                | Lang::Python
-                | Lang::C
-                | Lang::Cpp
-                | Lang::Bash
-        )
+        FileType::Code(lang) if resolves_imports(lang)
     );
-    if !importable {
+    if !resolvable {
         return ImportScan::No;
     }
     let Ok(meta) = std::fs::metadata(file) else {
@@ -1402,5 +1433,166 @@ mod tests {
             .map(|d| (d.path.as_path(), d.import_lines.as_slice()))
             .collect();
         assert_eq!(used_by, [(root.join("src/main.rs").as_path(), &[1][..])]);
+    }
+
+    /// Each dependent of `target` under a tree of `files`, with whether it is
+    /// in the target's package, and whether an import can name the target.
+    fn packages_of(files: &[(&str, &str)], target: &str) -> (Vec<(String, bool)>, bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for (rel, content) in files {
+            write(&root, rel, content);
+        }
+        let bloom = crate::index::bloom::BloomFilterCache::new();
+        let result =
+            analyze_deps(&root.join(target), &root, &bloom, WalkConfig::default()).unwrap();
+        let mut dependents: Vec<(String, bool)> = result
+            .used_by
+            .iter()
+            .map(|d| {
+                let rel = d.path.strip_prefix(&root).unwrap().display().to_string();
+                (rel, d.same_package)
+            })
+            .collect();
+        dependents.sort();
+        (dependents, result.importable)
+    }
+
+    fn pairs(expected: &[(&str, bool)]) -> Vec<(String, bool)> {
+        expected.iter().map(|&(p, s)| (p.to_string(), s)).collect()
+    }
+
+    /// #379: a Go file calls the functions of its own package with no
+    /// import, so every one was a dependent by name only. A package is one
+    /// directory: `other/` declaring `package pkg` is another package, and so
+    /// is the external test package `pkg_test` beside the target.
+    #[test]
+    fn go_files_of_the_target_package_are_in_it() {
+        let (found, importable) = packages_of(
+            &[
+                (
+                    "pkg/target.go",
+                    "package pkg\n\nfunc Helper() int { return 1 }\n",
+                ),
+                (
+                    "pkg/same.go",
+                    "package pkg\n\nfunc useIt() int { return Helper() }\n",
+                ),
+                (
+                    "pkg/ext_test.go",
+                    "package pkg_test\n\nfunc TestIt() { Helper() }\n",
+                ),
+                (
+                    "other/far.go",
+                    "package pkg\n\nfunc far() int { return Helper() }\n",
+                ),
+            ],
+            "pkg/target.go",
+        );
+        assert_eq!(
+            found,
+            pairs(&[
+                ("other/far.go", false),
+                ("pkg/ext_test.go", false),
+                ("pkg/same.go", true),
+            ])
+        );
+        assert!(!importable);
+    }
+
+    /// Java, Kotlin and Scala files in one package reach each other without
+    /// an import, in any directory and across the three languages.
+    #[test]
+    fn java_files_that_declare_the_target_package_are_in_it() {
+        let (found, importable) = packages_of(
+            &[
+                (
+                    "src/com/ex/Target.java",
+                    "package com.ex;\n\npublic class Target {\n    public static int helperCall() { return 1; }\n}\n",
+                ),
+                (
+                    "test/com/ex/Same.java",
+                    "@Deprecated\npackage com . ex;\n\nclass Same {\n    int run() { return Target.helperCall(); }\n}\n",
+                ),
+                (
+                    "src/com/ex/Use.kt",
+                    "package com.ex\n\nfun use(): Int = Target.helperCall()\n",
+                ),
+                (
+                    "src/com/other/Far.java",
+                    "package com.other;\n\nclass Far {\n    int run() { return Target.helperCall(); }\n}\n",
+                ),
+            ],
+            "src/com/ex/Target.java",
+        );
+        assert_eq!(
+            found,
+            pairs(&[
+                ("src/com/ex/Use.kt", true),
+                ("src/com/other/Far.java", false),
+                ("test/com/ex/Same.java", true),
+            ])
+        );
+        assert!(!importable);
+    }
+
+    #[test]
+    fn kotlin_files_that_declare_the_target_package_are_in_it() {
+        let (found, _) = packages_of(
+            &[
+                (
+                    "a/Target.kt",
+                    "package com.ex\n\nfun helperCall(): Int = 1\n",
+                ),
+                (
+                    "b/Same.kt",
+                    "package com.ex\n\nfun same(): Int = helperCall()\n",
+                ),
+                (
+                    "c/Far.kt",
+                    "package com.other\n\nfun far(): Int = helperCall()\n",
+                ),
+            ],
+            "a/Target.kt",
+        );
+        assert_eq!(found, pairs(&[("b/Same.kt", true), ("c/Far.kt", false)]));
+    }
+
+    /// Scala's package clauses chain: `package com` then `package ex` is
+    /// the package `com.ex`.
+    #[test]
+    fn scala_files_that_declare_the_target_package_are_in_it() {
+        let (found, _) = packages_of(
+            &[
+                (
+                    "Target.scala",
+                    "package com.ex\n\nobject Target {\n  def helperCall(): Int = 1\n}\n",
+                ),
+                (
+                    "Same.scala",
+                    "package com\npackage ex\n\nobject Same {\n  def run(): Int = Target.helperCall()\n}\n",
+                ),
+                (
+                    "Far.scala",
+                    "package com.other\n\nobject Far {\n  def run(): Int = Target.helperCall()\n}\n",
+                ),
+            ],
+            "Target.scala",
+        );
+        assert_eq!(found, pairs(&[("Far.scala", false), ("Same.scala", true)]));
+    }
+
+    /// An include names a header, so a C source file is one no import can
+    /// name, and its dependents can be told apart only through its header.
+    #[test]
+    fn only_a_target_an_import_can_name_is_importable() {
+        let importable =
+            |file: &str| packages_of(&[(file, "int helper_call(void) { return 1; }\n")], file).1;
+        assert!(importable("lib.h"));
+        assert!(importable("lib.rs"));
+        assert!(importable("lib.py"));
+        assert!(!importable("lib.c"));
+        assert!(!importable("lib.cpp"));
+        assert!(!importable("lib.rb"));
     }
 }
