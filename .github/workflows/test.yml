@@ -34,4 +34,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v6
       - run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # ratchet:Swatinem/rust-cache@v2
-      - run: cargo test --locked --workspace
+      # Every failing test, not only the first failing test binary's.
+      - run: cargo test --locked --workspace --no-fail-fast

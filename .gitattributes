@@ -1,0 +1,4 @@
+# Check text out with LF line endings on every platform. The binary embeds
+# files from the checkout (the prompts, its own sources for the schema
+# test), so a CRLF checkout on Windows would build a different binary.
+* text=auto eol=lf
