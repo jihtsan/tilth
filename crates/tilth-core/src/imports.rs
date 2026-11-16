@@ -886,6 +886,75 @@ fn resolve(dir: &Path, source: &str, lang: Lang) -> Option<PathBuf> {
     raw.map(|p| normalize_path(&p))
 }
 
+/// Whether `lang`'s imports resolve to local files, by `resolve` or, in
+/// Rust, by the module tree. Elsewhere the mapping from a module to its
+/// files lives in build-system conventions tilth does not read.
+pub(crate) fn resolves_imports(lang: Lang) -> bool {
+    matches!(
+        lang,
+        Lang::Rust
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::JavaScript
+            | Lang::Python
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Bash
+    )
+}
+
+/// Whether an import that tilth resolves can name `file`, of `lang`. An
+/// include names a C or C++ header, never a source file.
+pub(crate) fn can_be_imported(file: &Path, lang: Lang) -> bool {
+    resolves_imports(lang)
+        && (!matches!(lang, Lang::C | Lang::Cpp)
+            || file.extension().is_some_and(|e| e == "h" || e == "hpp"))
+}
+
+/// The package `content`, of `lang`, declares, read from its syntax tree:
+/// Go's `package` clause, Java's `package` declaration, Kotlin's package
+/// header, or Scala's package clauses, which chain (`package a` then
+/// `package b` is `a.b`). `None` when the file declares none, when a Scala
+/// file holds more than one package block, or for any other language.
+pub(crate) fn declared_package(content: &str, lang: Lang) -> Option<String> {
+    let declaration = match lang {
+        Lang::Go | Lang::Scala => "package_clause",
+        Lang::Java => "package_declaration",
+        Lang::Kotlin => "package_header",
+        _ => return None,
+    };
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&outline_language(lang)?).ok()?;
+    let tree = parser.parse(content, None)?;
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let mut clauses = root
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() == declaration);
+    if lang != Lang::Scala {
+        // The name is the declaration's one child that is not an annotation.
+        let clause = clauses.next()?;
+        let mut cursor = clause.walk();
+        let name = clause
+            .named_children(&mut cursor)
+            .find(|n| !n.kind().ends_with("annotation"))?;
+        return Some(compact(name, content));
+    }
+    let mut package = String::new();
+    let mut closed = false;
+    for clause in clauses {
+        // A clause with a body holds its package; a clause after it
+        // opens another one.
+        if closed {
+            return None;
+        }
+        let name = clause.child_by_field_name("name")?;
+        package = join_path(&package, &compact(name, content), ".");
+        closed = clause.child_by_field_name("body").is_some();
+    }
+    (!package.is_empty()).then_some(package)
+}
+
 /// Lexically collapse `.` and `..` components without touching the filesystem.
 /// `dir.join("../foo")` returns a `PathBuf` containing literal `..`; without this,
 /// distinct spellings of the same target file produce distinct `PathBuf`s and
@@ -1195,6 +1264,27 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A Scala package block holds its package, and a file of two blocks
+    /// is in no one package. A file that declares none is in none.
+    #[test]
+    fn a_file_declares_at_most_one_package() {
+        let package = |content: &str, lang| declared_package(content, lang);
+        assert_eq!(
+            package("package a.b {\n  object X\n}\n", Lang::Scala).as_deref(),
+            Some("a.b")
+        );
+        assert_eq!(
+            package(
+                "package a { object X }\npackage b { object Y }\n",
+                Lang::Scala
+            ),
+            None
+        );
+        assert_eq!(package("class X {}\n", Lang::Java), None);
+        assert_eq!(package("fun x() = 1\n", Lang::Kotlin), None);
+        assert_eq!(package("pub mod a {}\n", Lang::Rust), None);
     }
 
     #[test]
