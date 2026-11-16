@@ -23,10 +23,12 @@ are shared with the `tilth` binary and carry no stability promise.
 | `TestEntry`, `TestKind` | One suite or case. |
 | `extract_imports(&str, Lang) -> Vec<Import>` | Every module a file imports, one `Import` per module: a Go import block, a Rust `use` group and Python's `import os, json` each give one per module named. |
 | `Import` | One module: its `source`, the `line` that names it, its statement's `start_line` and `end_line`, and for a Python `from m import a, b` the `names` it takes (each a name in `m` or a submodule of it). |
+| `rust_mod_declarations(&str) -> Vec<ModDecl>` | Every Rust `mod name;` in a file: the modules whose code is in a file of their own. `extract_imports` gives the `use` statements. |
+| `ModDecl` | One declaration: the module's `name`, the file a `#[path]` attribute names, the inline modules it sits `within`, and its `line`. |
 | `is_import_line(&str, Lang) -> bool` | Whether a line starts an import statement. |
 | `extract_import_source(&str, Option<Lang>) -> String` | The source an import statement's text names, read as one source. |
 | `is_external(&str, Lang) -> bool` | Whether that module lies outside the project. |
-| `resolve_related_files_with_content(&Path, &str) -> Vec<PathBuf>` | The local files a file's imports resolve to. |
+| `resolve_related_files_with_content(&Path, &str) -> Vec<PathBuf>` | The local files a file's imports resolve to, with the files a Rust file's `mod` declarations name. |
 | `find_callers_batch(&HashSet<String>, Walk, &BloomFilterCache, stop_after: Option<usize>, per_file) -> Result<CallerWalk<T>, TilthError>` | Call sites of a set of symbols in the files a walk visits. `per_file` reduces each file's sites to what you keep; results come in path order, with the code files skipped for size that name a target. `stop_after` ends the walk once that many sites are found, and `reached_bound` then says the counts are lower bounds. |
 | `find_callers_and_owners(targets, owner_names, Walk, &BloomFilterCache, per_file) -> Result<CallerWalk<T>, TilthError>` | The same walk, which also hands `per_file` the types that define each of `owner_names`, found in the same parse. |
 | `CallerWalk`, `CallerMatch`, `BloomFilterCache` | A walk's results; one call site; the per-file pre-filter the walk shares. |

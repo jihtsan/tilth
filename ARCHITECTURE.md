@@ -652,7 +652,11 @@ machinery:
   imports resolve where Python 3 looks: the importer's directories that
   are not packages, up to the project root, and their `src/`; without a
   root, only the nearest. `from pkg import mod` resolves to the
-  submodule `pkg/mod.py` when there is one. `format_deps` (binary)
+  submodule `pkg/mod.py` when there is one. Rust imports resolve by the
+  module tree: a bodiless `mod foo;` imports `foo.rs` or `foo/mod.rs`
+  (or its `#[path]` file), beside a crate root or `mod.rs` and under
+  `x/` for any other `x.rs`, and `self::` and `super::` start from the
+  same directories. `format_deps` (binary)
   does the human output: it lists the first 15 dependents, or all of
   them with `--full`, and says how many it left out, under a budget
   too, and how many were found by a call alone. The external-dep stdlib

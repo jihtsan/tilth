@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::TilthError;
-use crate::imports::{extract_imports, is_external, resolve_import};
+use crate::imports::{is_external, references, Reference};
 use crate::lang::detect_file_type_with_content;
 use crate::lang::outline::get_outline_entries;
 use crate::search::callees::{extract_callee_names, resolve_callees};
@@ -181,19 +181,20 @@ pub fn analyze_deps(
 
     // Merge in import-resolved files (may not have resolved callees if symbols
     // weren't matched, but the import relationship itself is meaningful)
-    let imports = extract_imports(&content, lang);
     let mut external_set: HashSet<String> = HashSet::new();
-    for import in &imports {
-        let local = resolve_import(path, lang, import);
+    for reference in references(&content, lang) {
+        let local = reference.resolve(path, lang);
         if !local.is_empty() {
             for import_path in local {
                 local_by_file.entry(import_path).or_default();
             }
-        } else if is_external(&import.source, lang)
-            && !is_stdlib(&import.source, lang)
-            && is_valid_module_path(&import.source)
-        {
-            external_set.insert(import.source.clone());
+        } else if let Reference::Import { import, .. } = reference {
+            if is_external(&import.source, lang)
+                && !is_stdlib(&import.source, lang)
+                && is_valid_module_path(&import.source)
+            {
+                external_set.insert(import.source);
+            }
         }
     }
 
@@ -539,8 +540,9 @@ fn importer_from(
     let barrel_file = is_reexporting_file(file);
     let mut reexports = barrel_file;
     let own_path = file.canonicalize().ok()?;
-    for import in extract_imports(&content, lang) {
-        let target = resolve_import(file, lang, &import)
+    for reference in references(&content, lang) {
+        let target = reference
+            .resolve(file, lang)
             .into_iter()
             .filter(|r| r.file_name().is_some_and(|n| names.contains(n)))
             .map(|r| r.canonicalize().unwrap_or(r))
@@ -548,10 +550,11 @@ fn importer_from(
         let Some(resolved) = target else {
             continue;
         };
+        let (start_line, end_line) = reference.lines();
         let statement = content
             .lines()
-            .skip(import.start_line as usize - 1)
-            .take((import.end_line - import.start_line) as usize + 1)
+            .skip(start_line as usize - 1)
+            .take((end_line - start_line) as usize + 1)
             .collect::<Vec<_>>()
             .join("\n");
         // A star statement takes every name without spelling one. Passing
@@ -563,7 +566,7 @@ fn importer_from(
         if !(keep(&statement) || passes_on || (star.is_some() && mentions_wanted)) {
             continue;
         }
-        lines.push(import.start_line);
+        lines.push(start_line);
         if through {
             via.get_or_insert(resolved);
         }
@@ -1344,5 +1347,60 @@ mod tests {
         assert_eq!(result.uses_local.len(), 12, "{:?}", result.uses_local);
         assert_eq!(result.used_by.len(), 60);
         assert!(result.used_by[0].path.ends_with("user00.ts"));
+    }
+
+    /// A crate root reaches its modules by `mod` and paths, which is an
+    /// import of each module's file (#378). Matching `use` alone, `main.rs`
+    /// used nothing and was a dependent of `foo.rs` by name only. A `mod`
+    /// whose file is missing is no external crate.
+    #[test]
+    fn rust_mod_declarations_are_local_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(
+            &root,
+            "src/main.rs",
+            "mod foo;\nmod bar;\nmod gone;\n\nfn main() {\n    foo::run_engine();\n}\n",
+        );
+        write(&root, "src/foo.rs", "pub fn run_engine() {}\n");
+        write(&root, "src/bar.rs", "pub fn build() {}\n");
+        let bloom = crate::index::bloom::BloomFilterCache::new();
+        let main = analyze_deps(
+            &root.join("src/main.rs"),
+            &root,
+            &bloom,
+            WalkConfig::default(),
+        )
+        .unwrap();
+        let local: Vec<(&Path, &[String])> = main
+            .uses_local
+            .iter()
+            .map(|d| (d.path.as_path(), d.symbols.as_slice()))
+            .collect();
+        assert_eq!(
+            local,
+            [
+                (root.join("src/bar.rs").as_path(), &[][..]),
+                (
+                    root.join("src/foo.rs").as_path(),
+                    &["run_engine".to_string()][..]
+                ),
+            ]
+        );
+        assert_eq!(main.uses_external, Vec::<String>::new());
+
+        let foo = analyze_deps(
+            &root.join("src/foo.rs"),
+            &root,
+            &bloom,
+            WalkConfig::default(),
+        )
+        .unwrap();
+        let used_by: Vec<(&Path, &[u32])> = foo
+            .used_by
+            .iter()
+            .map(|d| (d.path.as_path(), d.import_lines.as_slice()))
+            .collect();
+        assert_eq!(used_by, [(root.join("src/main.rs").as_path(), &[1][..])]);
     }
 }
