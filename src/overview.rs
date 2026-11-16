@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -12,7 +11,7 @@ use serde::Deserialize;
 use crate::format::{self, noun};
 use crate::git::Git;
 use tilth_core::lang::detect_file_type;
-use tilth_core::search::walk::SKIP_DIRS;
+use tilth_core::search::walk::{base_walk_builder, WalkConfig};
 use tilth_core::types::{FileType, Lang};
 
 /// How many directories the `dirs:` line lists before it counts the rest.
@@ -21,14 +20,24 @@ const DIRS_SHOWN: usize = 10;
 const DEPS_SHOWN: usize = 10;
 /// How many hot files the `hot` line lists before it counts the rest.
 const HOT_SHOWN: usize = 5;
+/// How many walk entries the file count looks at before it stops and
+/// shows its count as a lower bound ("N+ source files"), so a huge tree
+/// stays within the overview's time budget.
+const COUNT_CAP: usize = 10_000;
+/// The walk depth of the deepest file the `dirs`, `hot` and `tests` lines
+/// look at: one two directories below the root.
+const SAMPLE_DEPTH: usize = 3;
 
-/// Compute a project fingerprint for MCP initialization.
+/// Compute a project fingerprint for MCP initialization, walking `root`
+/// by the `walk` settings every search uses.
 /// Must be fast (<250ms) — runs synchronously in the initialize handler.
 /// Returns empty string on any failure (no error propagation).
 #[must_use]
-pub fn fingerprint(root: &Path) -> String {
+pub fn fingerprint(root: &Path, walk: WalkConfig) -> String {
     let start = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fingerprint_inner(root)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fingerprint_inner(root, walk, COUNT_CAP)
+    }));
     let elapsed = start.elapsed();
     if elapsed.as_millis() > 250 {
         crate::diag::emit(format_args!(
@@ -40,16 +49,16 @@ pub fn fingerprint(root: &Path) -> String {
 }
 
 #[expect(clippy::too_many_lines, reason = "split by responsibility in #315")]
-fn fingerprint_inner(root: &Path) -> String {
+fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    // Walk files (depth 2) — collect language counts, modules, entry points
-    let walk = walk_files(root);
+    let count = count_sources(root, walk, cap);
+    let sample = sample_files(root, walk);
 
     // Primary language: the most files, and on a tie the name first in
     // alphabetical order, since the map iterates in a random order.
-    let primary_lang = walk
-        .lang_counts
+    let primary_lang = count
+        .by_lang
         .iter()
         .max_by(|(a, a_count), (b, b_count)| {
             a_count
@@ -60,15 +69,16 @@ fn fingerprint_inner(root: &Path) -> String {
 
     let lang_name = primary_lang.map_or("Unknown", lang_display_name);
     let total_files = primary_lang
-        .and_then(|l| walk.lang_counts.get(&l))
+        .and_then(|l| count.by_lang.get(&l))
         .copied()
-        .unwrap_or_else(|| walk.lang_counts.values().sum::<usize>());
+        .unwrap_or_else(|| count.by_lang.values().sum::<usize>());
+    let at_least = if count.capped { "+" } else { "" };
 
     // Modules: dirs with >=2 files of the primary language, with common prefix stripped.
     // Keys in module_lang_counts may be "dir" or "dir/subdir" (for deeply nested projects).
     let modules: Vec<String> = {
         // Collect dirs with >=2 primary-language files
-        let mut mods: Vec<(String, usize)> = walk
+        let mut mods: Vec<(String, usize)> = sample
             .module_lang_counts
             .iter()
             .filter_map(|(name, lang_map)| {
@@ -157,7 +167,7 @@ fn fingerprint_inner(root: &Path) -> String {
     // Header line
     let dir_count = modules.len();
     lines.push(format!(
-        "[tilth] {lang_name} project — {total_files} source {}, {dir_count} {}",
+        "[tilth] {lang_name} project — {total_files}{at_least} source {}, {dir_count} {}",
         noun(total_files, "file", "files"),
         noun(dir_count, "directory", "directories")
     ));
@@ -183,7 +193,7 @@ fn fingerprint_inner(root: &Path) -> String {
             }
 
             // Hot files (only for projects with local imports)
-            if let Some(hot) = hot_files(root, &walk, primary_lang) {
+            if let Some(hot) = hot_files(root, &sample, primary_lang) {
                 lines.push(format!("  hot (× = importers): {hot}"));
             }
 
@@ -193,7 +203,7 @@ fn fingerprint_inner(root: &Path) -> String {
             }
 
             // Test style
-            if let Some(tests) = test_style(root, &walk, primary_lang) {
+            if let Some(tests) = test_style(root, &sample, primary_lang) {
                 lines.push(format!("  tests: {tests}"));
             }
 
@@ -210,13 +220,13 @@ fn fingerprint_inner(root: &Path) -> String {
         }
     } else {
         // No manifest — still show hot, git, tests
-        if let Some(hot) = hot_files(root, &walk, primary_lang) {
+        if let Some(hot) = hot_files(root, &sample, primary_lang) {
             lines.push(format!("  hot (× = importers): {hot}"));
         }
         if let Some(git) = git_context(root, Instant::now() + GIT_LIMIT) {
             lines.push(format!("  git: {git}"));
         }
-        if let Some(tests) = test_style(root, &walk, primary_lang) {
+        if let Some(tests) = test_style(root, &sample, primary_lang) {
             lines.push(format!("  tests: {tests}"));
         }
     }
@@ -257,15 +267,44 @@ fn lang_display_name(lang: Lang) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// File walk (depth 2)
+// File walks
 // ---------------------------------------------------------------------------
+
+/// Source files per language, from a walk of the whole tree that may stop
+/// at its cap.
+struct SourceCount {
+    by_lang: HashMap<Lang, usize>,
+    /// Whether the walk stopped at its cap with entries left, so the tree
+    /// may hold more files than were counted.
+    capped: bool,
+}
+
+/// Count the source files under `root` by the walk policy every search
+/// uses. The walk looks at no more than `cap` entries, so a huge tree stays
+/// within the overview's time budget and its count reads as a lower bound.
+fn count_sources(root: &Path, walk: WalkConfig, cap: usize) -> SourceCount {
+    let mut by_lang: HashMap<Lang, usize> = HashMap::new();
+    let mut entries = base_walk_builder(root, walk).build().flatten();
+    for entry in entries.by_ref().take(cap) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        if let FileType::Code(lang) = detect_file_type(entry.path()) {
+            *by_lang.entry(lang).or_insert(0) += 1;
+        }
+    }
+    SourceCount {
+        by_lang,
+        capped: entries.next().is_some(),
+    }
+}
 
 #[expect(
     clippy::struct_excessive_bools,
     reason = "by design: one flag per test-directory convention, read by test_style"
 )]
-struct WalkResult {
-    lang_counts: HashMap<Lang, usize>,
+#[derive(Default)]
+struct Sample {
     /// Top-level dirs → per-language file counts
     module_lang_counts: HashMap<String, HashMap<Lang, usize>>,
     /// Code files found: (path relative to root, size in bytes)
@@ -277,145 +316,65 @@ struct WalkResult {
     has_spec_dir: bool,
 }
 
-fn walk_files(root: &Path) -> WalkResult {
-    let mut lang_counts: HashMap<Lang, usize> = HashMap::new();
-    let mut module_lang_counts: HashMap<String, HashMap<Lang, usize>> = HashMap::new();
-    let mut code_files: Vec<(String, u64)> = Vec::new();
-    let mut has_tests_dir = false;
-    let mut has_test_dir = false;
-    let mut has_dunder_tests = false;
-    let mut has_spec_dir = false;
-
-    // Walk depth 0 (root itself)
-    walk_dir(
-        root,
-        root,
-        0,
-        2,
-        &mut lang_counts,
-        &mut module_lang_counts,
-        &mut code_files,
-        &mut has_tests_dir,
-        &mut has_test_dir,
-        &mut has_dunder_tests,
-        &mut has_spec_dir,
-    );
-
-    WalkResult {
-        lang_counts,
-        module_lang_counts,
-        code_files,
-        has_tests_dir,
-        has_test_dir,
-        has_dunder_tests,
-        has_spec_dir,
-    }
-}
-
-#[expect(clippy::too_many_arguments, reason = "a WalkCtx struct in #315")]
-fn walk_dir(
-    dir: &Path,
-    root: &Path,
-    depth: usize,
-    max_depth: usize,
-    lang_counts: &mut HashMap<Lang, usize>,
-    module_lang_counts: &mut HashMap<String, HashMap<Lang, usize>>,
-    code_files: &mut Vec<(String, u64)>,
-    has_tests_dir: &mut bool,
-    has_test_dir: &mut bool,
-    has_dunder_tests: &mut bool,
-    has_spec_dir: &mut bool,
-) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+/// The top of the tree the `dirs`, `hot` and `tests` lines describe: files
+/// up to two directories below the root, and directories down to that depth.
+fn sample_files(root: &Path, walk: WalkConfig) -> Sample {
+    let mut sample = Sample::default();
+    let entries = base_walk_builder(root, walk)
+        .max_depth(Some(SAMPLE_DEPTH))
+        .build()
+        .flatten();
+    for entry in entries {
+        let Some(ft) = entry.file_type() else {
             continue;
         };
-
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-
         if ft.is_dir() {
-            if SKIP_DIRS.contains(&name) {
+            // The root is the project, never one of its test directories.
+            if entry.depth() == 0 {
                 continue;
             }
-
-            // Track test directories at any depth
-            match name {
-                "tests" => *has_tests_dir = true,
-                "test" => *has_test_dir = true,
-                "__tests__" => *has_dunder_tests = true,
-                "spec" => *has_spec_dir = true,
+            match entry.file_name().to_str() {
+                Some("tests") => sample.has_tests_dir = true,
+                Some("test") => sample.has_test_dir = true,
+                Some("__tests__") => sample.has_dunder_tests = true,
+                Some("spec") => sample.has_spec_dir = true,
                 _ => {}
             }
-
-            if depth < max_depth {
-                walk_dir(
-                    &path,
-                    root,
-                    depth + 1,
-                    max_depth,
-                    lang_counts,
-                    module_lang_counts,
-                    code_files,
-                    has_tests_dir,
-                    has_test_dir,
-                    has_dunder_tests,
-                    has_spec_dir,
-                );
-            }
         } else if ft.is_file() {
-            if let FileType::Code(lang) = detect_file_type(&path) {
-                *lang_counts.entry(lang).or_insert(0) += 1;
+            let path = entry.path();
+            let FileType::Code(lang) = detect_file_type(path) else {
+                continue;
+            };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            // Track size for hot files
+            let size = entry.metadata().map_or(0, |m| m.len());
+            sample
+                .code_files
+                .push((rel.to_string_lossy().to_string(), size));
 
-                // Track size for hot files
-                let size = entry.metadata().map_or(0, |m| m.len());
-                if let Ok(rel) = path.strip_prefix(root) {
-                    let rel_str = rel.to_string_lossy().to_string();
-
-                    code_files.push((rel_str, size));
-
-                    // Track module — use up to 2 path components as the key,
-                    // but only for files nested at least one level deep.
-                    // e.g. src/diff/mod.rs → key "src/diff", lib.rs → skipped
-                    {
-                        let mut comps = rel.components();
-                        if let Some(c1) = comps.next() {
-                            let remaining: Vec<_> = comps.collect();
-                            if !remaining.is_empty() {
-                                let key = if remaining.len() >= 2 {
-                                    // File is at depth 3+: use first two components
-                                    format!(
-                                        "{}/{}",
-                                        c1.as_os_str().to_string_lossy(),
-                                        remaining[0].as_os_str().to_string_lossy()
-                                    )
-                                } else {
-                                    // File is at depth 2: use first component only
-                                    c1.as_os_str().to_string_lossy().to_string()
-                                };
-                                *module_lang_counts
-                                    .entry(key)
-                                    .or_default()
-                                    .entry(lang)
-                                    .or_insert(0) += 1;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check test file patterns
-            if name.contains(".test.") || name.contains(".spec.") {
-                // These contribute to test style but we detect in test_style()
+            // Track module — use up to 2 path components as the key,
+            // but only for files nested at least one level deep.
+            // e.g. src/diff/mod.rs → key "src/diff", lib.rs → skipped
+            let dirs: Vec<_> = rel
+                .parent()
+                .into_iter()
+                .flat_map(Path::components)
+                .take(2)
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect();
+            if !dirs.is_empty() {
+                *sample
+                    .module_lang_counts
+                    .entry(dirs.join("/"))
+                    .or_default()
+                    .entry(lang)
+                    .or_insert(0) += 1;
             }
         }
     }
+    sample
 }
 
 // ---------------------------------------------------------------------------
@@ -638,38 +597,38 @@ fn git_context(root: &Path, deadline: Instant) -> Option<String> {
 // Test style detection
 // ---------------------------------------------------------------------------
 
-fn test_style(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Option<String> {
+fn test_style(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Option<String> {
     let mut styles: Vec<String> = Vec::new();
 
     // Directory-based test detection
-    if walk.has_tests_dir {
+    if sample.has_tests_dir {
         styles.push("tests/".to_string());
     }
-    if walk.has_test_dir {
+    if sample.has_test_dir {
         styles.push("test/".to_string());
     }
-    if walk.has_dunder_tests {
+    if sample.has_dunder_tests {
         styles.push("__tests__/".to_string());
     }
-    if walk.has_spec_dir {
+    if sample.has_spec_dir {
         styles.push("spec/".to_string());
     }
 
     // File pattern detection
-    let has_test_files = walk
+    let has_test_files = sample
         .code_files
         .iter()
         .any(|(path, _)| path.contains(".test.") || path.contains(".spec."));
-    let has_go_tests = walk
+    let has_go_tests = sample
         .code_files
         .iter()
         .any(|(path, _)| path.ends_with("_test.go"));
-    let has_py_tests = walk
+    let has_py_tests = sample
         .code_files
         .iter()
         .any(|(path, _)| path.starts_with("test_") || path.contains("/test_"));
 
-    if has_test_files && !walk.has_dunder_tests {
+    if has_test_files && !sample.has_dunder_tests {
         styles.push("*.test/spec files".to_string());
     }
     if has_go_tests {
@@ -681,7 +640,7 @@ fn test_style(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Opt
 
     // Rust in-source test detection
     if primary_lang == Some(Lang::Rust) {
-        let has_cfg_test = walk
+        let has_cfg_test = sample
             .code_files
             .iter()
             .filter(|(path, _)| {
@@ -714,11 +673,11 @@ fn test_style(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Opt
 /// The most imported local files, from the imports of the 100 smallest code
 /// files. The limit is a file count, never a clock, so a loaded machine
 /// reads the same files as an idle one (#281).
-fn hot_files(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Option<String> {
+fn hot_files(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Option<String> {
     primary_lang?; // require a detected language
 
     // Sort by size (smallest first) and take first 100
-    let mut files: Vec<&(String, u64)> = walk.code_files.iter().collect();
+    let mut files: Vec<&(String, u64)> = sample.code_files.iter().collect();
     files.sort_by_key(|(_, size)| *size);
     files.truncate(100);
 
@@ -824,11 +783,12 @@ fn hot_files(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Opti
 mod tests {
     use super::*;
     use crate::git::tests::git;
+    use std::fs;
 
     #[test]
     fn test_fingerprint_on_tilth() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let output = fingerprint(root);
+        let output = fingerprint(root, WalkConfig::default());
 
         assert!(!output.is_empty(), "fingerprint should not be empty");
         assert!(
@@ -863,8 +823,8 @@ mod tests {
             )
             .unwrap();
         }
-        let walk = walk_files(tmp.path());
-        let hot = hot_files(tmp.path(), &walk, Some(Lang::Rust));
+        let sample = sample_files(tmp.path(), WalkConfig::default());
+        let hot = hot_files(tmp.path(), &sample, Some(Lang::Rust));
         assert_eq!(
             hot.as_deref(),
             Some("src/other.rs ×2, src/types.rs(Outline) ×2")
@@ -892,7 +852,7 @@ mod tests {
         let expected = "[tilth] Python project — 16 source files, 8 directories\n  \
              dirs: alpha/ bravo/ charlie/ delta/ echo/ foxtrot/ golf/ hotel/";
         for _ in 0..10 {
-            assert_eq!(fingerprint(tmp.path()), expected);
+            assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
         }
     }
 
@@ -916,12 +876,99 @@ mod tests {
         let tmp = tree_of_dirs(DIRS_SHOWN + 1);
         let expected = "[tilth] Python project — 22 source files, 11 directories\n  \
              dirs: d00/ d01/ d02/ d03/ d04/ d05/ d06/ d07/ d08/ d09/ and 1 more";
-        assert_eq!(fingerprint(tmp.path()), expected);
+        assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
 
         let tmp = tree_of_dirs(DIRS_SHOWN);
         let expected = "[tilth] Python project — 20 source files, 10 directories\n  \
              dirs: d00/ d01/ d02/ d03/ d04/ d05/ d06/ d07/ d08/ d09/";
-        assert_eq!(fingerprint(tmp.path()), expected);
+        assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
+    }
+
+    /// A tree holding each of `files`, a path relative to its root, with
+    /// one line of Python in it.
+    fn tree_of_files(files: &[&str]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        for file in files {
+            let path = tmp.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x = 1\n").unwrap();
+        }
+        tmp
+    }
+
+    /// The header counted the files of the top two directory levels and
+    /// called that the project's size (#383).
+    #[test]
+    fn the_file_count_covers_the_whole_tree() {
+        let tmp = tree_of_files(&[
+            "pkg/mod/a.py",
+            "pkg/mod/b.py",
+            "pkg/mod/sub/c.py",
+            "pkg/mod/sub/deeper/d.py",
+        ]);
+        assert_eq!(
+            fingerprint(tmp.path(), WalkConfig::default()),
+            "[tilth] Python project — 4 source files, 1 directory\n  dirs: pkg/mod/"
+        );
+    }
+
+    /// The overview walked by hand, so it counted what `.tilthignore` hides
+    /// from every search (#383).
+    #[test]
+    fn the_overview_skips_what_tilthignore_hides() {
+        let tmp = tree_of_files(&["app/a.py", "app/b.py", "gen/x.py", "gen/y.py", "gen/z.py"]);
+        fs::write(tmp.path().join(".tilthignore"), "gen/\n").unwrap();
+        assert_eq!(
+            fingerprint(tmp.path(), WalkConfig::default()),
+            "[tilth] Python project — 2 source files, 1 directory\n  dirs: app/"
+        );
+    }
+
+    /// The count follows the gitignore setting, as every search does.
+    #[test]
+    fn the_file_count_follows_the_gitignore_setting() {
+        let tmp = tree_of_files(&["app/a.py", "app/b.py", "gen/x.py"]);
+        fs::write(tmp.path().join(".gitignore"), "gen/\n").unwrap();
+        let header = |respect_gitignore| {
+            let walk = WalkConfig {
+                respect_gitignore,
+                ..WalkConfig::default()
+            };
+            fingerprint(tmp.path(), walk)
+                .lines()
+                .next()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            header(false).as_deref(),
+            Some("[tilth] Python project — 3 source files, 1 directory")
+        );
+        assert_eq!(
+            header(true).as_deref(),
+            Some("[tilth] Python project — 2 source files, 1 directory")
+        );
+    }
+
+    /// A walk that stops at its cap shows its count as a lower bound,
+    /// never as an exact size (#383). The walk's entries are the root, the
+    /// directory and its files, so a cap of four counts two of three files.
+    #[test]
+    fn a_count_cut_short_says_so() {
+        let tmp = tree_of_files(&["app/a.py", "app/b.py", "app/c.py"]);
+        let header = |cap| {
+            fingerprint_inner(tmp.path(), WalkConfig::default(), cap)
+                .lines()
+                .next()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            header(4).as_deref(),
+            Some("[tilth] Python project — 2+ source files, 1 directory")
+        );
+        assert_eq!(
+            header(5).as_deref(),
+            Some("[tilth] Python project — 3 source files, 1 directory")
+        );
     }
 
     /// The `deps:` line of a manifest with `n` dependencies.
@@ -933,7 +980,7 @@ mod tests {
             format!("{{\"dependencies\": {{{}}}}}", deps.join(", ")),
         )
         .unwrap();
-        let summary = fingerprint(tmp.path());
+        let summary = fingerprint(tmp.path(), WalkConfig::default());
         summary
             .lines()
             .find(|line| line.starts_with("  deps: "))
@@ -973,8 +1020,8 @@ mod tests {
             )
             .unwrap();
         }
-        let walk = walk_files(tmp.path());
-        hot_files(tmp.path(), &walk, Some(Lang::Rust))
+        let sample = sample_files(tmp.path(), WalkConfig::default());
+        hot_files(tmp.path(), &sample, Some(Lang::Rust))
     }
 
     /// The summary listed five hot files and said nothing of the rest
@@ -1081,7 +1128,7 @@ mod tests {
     #[test]
     fn test_fingerprint_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let output = fingerprint(tmp.path());
+        let output = fingerprint(tmp.path(), WalkConfig::default());
 
         // Empty dir: should produce minimal output or empty
         // With 0 files and 0 modules, the header will say "0 source files"
