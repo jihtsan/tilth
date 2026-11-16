@@ -223,7 +223,7 @@ fn main() {
                     diag::emit(format_args!("overview error: {e}"));
                     process::exit(1);
                 });
-                let output = tilth::overview::fingerprint(&cwd);
+                let output = tilth::overview::fingerprint(&cwd, config.walk);
                 if output.is_empty() {
                     diag::emit(format_args!("No project fingerprint could be generated."));
                     process::exit(1);
