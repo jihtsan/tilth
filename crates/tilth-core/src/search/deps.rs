@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::TilthError;
-use crate::imports::{extract_imports, is_external, resolve_import};
+use crate::imports::{extract_imports, resolve_import};
 use crate::lang::detect_file_type_with_content;
 use crate::lang::outline::get_outline_entries;
 use crate::search::callees::{extract_callee_names, resolve_callees};
@@ -189,7 +189,7 @@ pub fn analyze_deps(
             for import_path in local {
                 local_by_file.entry(import_path).or_default();
             }
-        } else if is_external(&import.source, lang)
+        } else if import.is_external(lang)
             && !is_stdlib(&import.source, lang)
             && is_valid_module_path(&import.source)
         {
@@ -1304,5 +1304,60 @@ mod tests {
         assert_eq!(result.uses_local.len(), 12, "{:?}", result.uses_local);
         assert_eq!(result.used_by.len(), 60);
         assert!(result.used_by[0].path.ends_with("user00.ts"));
+    }
+
+    /// A crate root reaches its modules by `mod` and paths, which is an
+    /// import of each module's file (#378). Matching `use` alone, `main.rs`
+    /// used nothing and was a dependent of `foo.rs` by name only. A `mod`
+    /// whose file is missing is no external crate.
+    #[test]
+    fn rust_mod_declarations_are_local_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(
+            &root,
+            "src/main.rs",
+            "mod foo;\nmod bar;\nmod gone;\n\nfn main() {\n    foo::run_engine();\n}\n",
+        );
+        write(&root, "src/foo.rs", "pub fn run_engine() {}\n");
+        write(&root, "src/bar.rs", "pub fn build() {}\n");
+        let bloom = crate::index::bloom::BloomFilterCache::new();
+        let main = analyze_deps(
+            &root.join("src/main.rs"),
+            &root,
+            &bloom,
+            WalkConfig::default(),
+        )
+        .unwrap();
+        let local: Vec<(&Path, &[String])> = main
+            .uses_local
+            .iter()
+            .map(|d| (d.path.as_path(), d.symbols.as_slice()))
+            .collect();
+        assert_eq!(
+            local,
+            [
+                (root.join("src/bar.rs").as_path(), &[][..]),
+                (
+                    root.join("src/foo.rs").as_path(),
+                    &["run_engine".to_string()][..]
+                ),
+            ]
+        );
+        assert_eq!(main.uses_external, Vec::<String>::new());
+
+        let foo = analyze_deps(
+            &root.join("src/foo.rs"),
+            &root,
+            &bloom,
+            WalkConfig::default(),
+        )
+        .unwrap();
+        let used_by: Vec<(&Path, &[u32])> = foo
+            .used_by
+            .iter()
+            .map(|d| (d.path.as_path(), d.import_lines.as_slice()))
+            .collect();
+        assert_eq!(used_by, [(root.join("src/main.rs").as_path(), &[1][..])]);
     }
 }

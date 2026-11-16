@@ -11,8 +11,8 @@ use tilth_core::{
     analyze_deps, detect_file_type, detect_file_type_with_content, extract_import_source,
     extract_imports, find_callers_batch, get_outline_entries, is_external, is_import_line,
     is_test_file, resolve_related_files_with_content, test_entries, BloomFilterCache, CallerMatch,
-    Dependent, DepsResult, FileType, Import, Lang, LocalDep, OutlineEntry, OutlineKind, TestEntry,
-    TestKind, TilthError, Walk, WalkConfig,
+    Dependent, DepsResult, FileType, Import, ImportKind, Lang, LocalDep, OutlineEntry, OutlineKind,
+    TestEntry, TestKind, TilthError, Walk, WalkConfig,
 };
 
 struct Sample {
@@ -210,6 +210,37 @@ fn rust_use_group_gives_one_import_per_member() {
             ("crate::error::Error", 4, 2, 5),
             ("std::fs", 6, 6, 6),
         ])
+    );
+}
+
+/// A bodiless `mod` imports the file that holds the module, and is never
+/// external; an inline `mod` imports nothing.
+#[test]
+fn rust_mod_declaration_is_a_local_import() {
+    let rust = "mod engine;\n#[path = \"sys/unix.rs\"]\nmod sys;\nmod tests {}\n";
+    let imports: Vec<(String, ImportKind, bool)> = extract_imports(rust, Lang::Rust)
+        .into_iter()
+        .map(|i| {
+            let external = i.is_external(Lang::Rust);
+            (i.source, i.kind, external)
+        })
+        .collect();
+    assert_eq!(
+        imports,
+        [
+            (
+                "engine".to_string(),
+                ImportKind::ModFile { path: None },
+                false
+            ),
+            (
+                "sys".to_string(),
+                ImportKind::ModFile {
+                    path: Some("sys/unix.rs".to_string())
+                },
+                false
+            ),
+        ]
     );
 }
 

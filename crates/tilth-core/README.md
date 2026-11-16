@@ -21,8 +21,9 @@ are shared with the `tilth` binary and carry no stability promise.
 | `is_test_file(&Path) -> bool` | Test files by path: `.test.`, `.spec.`, `__tests__/`, Go `*_test.go` and Python `test_*.py`. |
 | `test_entries(&str, Lang) -> Vec<TestEntry>` | `describe`/`it`/`test` structure as data, with lines and depth. |
 | `TestEntry`, `TestKind` | One suite or case. |
-| `extract_imports(&str, Lang) -> Vec<Import>` | Every module a file imports, one `Import` per module: a Go import block, a Rust `use` group and Python's `import os, json` each give one per module named. |
-| `Import` | One module: its `source`, the `line` that names it, its statement's `start_line` and `end_line`, and for a Python `from m import a, b` the `names` it takes (each a name in `m` or a submodule of it). |
+| `extract_imports(&str, Lang) -> Vec<Import>` | Every module a file imports, one `Import` per module: a Go import block, a Rust `use` group and Python's `import os, json` each give one per module named. A Rust `mod foo;` imports the file that holds `foo`. |
+| `Import` | One module: its `source`, the `line` that names it, its statement's `start_line` and `end_line`, for a Python `from m import a, b` the `names` it takes (each a name in `m` or a submodule of it), its `kind`, and for Rust the inline modules it sits `within`. `is_external(Lang)` says whether the module lies outside the project. |
+| `ImportKind` | An import statement, or a Rust `mod` declaration with its `#[path]`. |
 | `is_import_line(&str, Lang) -> bool` | Whether a line starts an import statement. |
 | `extract_import_source(&str, Option<Lang>) -> String` | The source an import statement's text names, read as one source. |
 | `is_external(&str, Lang) -> bool` | Whether that module lies outside the project. |

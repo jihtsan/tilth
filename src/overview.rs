@@ -749,7 +749,7 @@ fn hot_files(root: &Path, walk: &WalkResult, primary_lang: Option<Lang>) -> Opti
 
         // Collect import source strings for symbol extraction
         for import in imports {
-            if !tilth_core::imports::is_external(&import.source, file_lang) {
+            if !import.is_external(file_lang) {
                 all_import_sources.push(import.source);
             }
         }

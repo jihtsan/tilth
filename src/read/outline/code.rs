@@ -1,5 +1,5 @@
 use crate::format;
-use tilth_core::imports::{imports_in_tree, Import};
+use tilth_core::imports::{imports_in_tree, Import, ImportKind};
 use tilth_core::lang::outline::{extract_import_source, outline_language, walk_top_level};
 use tilth_core::types::{Lang, OutlineEntry, OutlineKind};
 
@@ -146,7 +146,8 @@ const SOURCES_SHOWN: usize = 5;
 /// Each module a statement names counts once, so a Go block or a Rust group
 /// lists its members. A statement with no module in `imports` (PHP, C# and
 /// the other languages `extract_imports` does not read) counts once, by the
-/// source its own text names.
+/// source its own text names. A Rust `mod foo;` is no statement here: the
+/// outline lists it as a module of its own.
 fn format_imports(
     statements: &[&OutlineEntry],
     imports: &[Import],
@@ -159,7 +160,10 @@ fn format_imports(
         named.extend(
             imports
                 .iter()
-                .filter(|i| (statement.start_line..=statement.end_line).contains(&i.start_line))
+                .filter(|i| {
+                    i.kind == ImportKind::Statement
+                        && (statement.start_line..=statement.end_line).contains(&i.start_line)
+                })
                 .map(|i| i.source.clone()),
         );
         if named.len() == before {
