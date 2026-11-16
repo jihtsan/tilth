@@ -36,6 +36,11 @@ const SAMPLE_DEPTH: usize = 3;
 pub fn fingerprint(root: &Path, walk: WalkConfig) -> String {
     let start = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "panic-probe")]
+        assert!(
+            !root.ends_with("tilth-panic-probe"),
+            "the overview panics on purpose"
+        );
         fingerprint_inner(root, walk, COUNT_CAP)
     }));
     let elapsed = start.elapsed();

@@ -510,8 +510,8 @@ fn emit_output(output: &str, is_tty: bool) {
 /// Write a whole response to stdout, the one sink every CLI path prints
 /// through. A reader that went away early (`tilth big.rs --full | head -1`)
 /// ends the run quietly with exit 0, as Unix tools do. `print!` panicked
-/// there instead and aborted with exit 134. Any other write failure, such
-/// as a full disk, is reported and exits 1.
+/// there instead. Any other write failure, such as a full disk, is reported
+/// and exits 1.
 fn write_stdout(output: &str) {
     #[expect(
         clippy::disallowed_methods,

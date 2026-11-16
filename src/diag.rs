@@ -8,8 +8,7 @@
 //!
 //! A message that cannot be written is dropped: stderr is the last channel
 //! left, so there is nowhere to report its failure, and a closed stderr must
-//! not stop the run. `eprintln!` would panic there instead, and the release
-//! profile aborts on panic.
+//! not stop the run. `eprintln!` would panic there instead.
 
 use std::fmt;
 use std::io::Write;

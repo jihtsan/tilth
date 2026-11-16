@@ -74,6 +74,17 @@ unimplemented = "warn"
 name = "tilth"
 path = "src/main.rs"
 
+[features]
+# Panics on purpose where the MCP server must survive one: the tool call
+# tilth_panic_probe, and the start-up overview of a root named
+# tilth-panic-probe. Only tests/mcp_panic.rs enables it; a shipped build
+# has neither.
+panic-probe = []
+
+[[test]]
+name = "mcp_panic"
+required-features = ["panic-probe"]
+
 [lints]
 workspace = true
 
@@ -148,7 +159,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Panics unwind, the default: the MCP server turns a panic in a tool call
+# into an error result and goes on serving. tests/mcp_panic.rs holds that in
+# this profile.
 overflow-checks = false
 
 [profile.release.build-override]

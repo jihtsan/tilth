@@ -462,6 +462,11 @@ fn run_tool_with_timeout(
     let args_owned = args.clone();
 
     let outcome = spawn_with_timeout(services.tracker(), timeout, move || {
+        #[cfg(feature = "panic-probe")]
+        assert!(
+            tool_name_owned != "tilth_panic_probe",
+            "tilth_panic_probe panics on purpose"
+        );
         dispatch_tool(&tool_name_owned, &args_owned, &services_worker)
     });
 

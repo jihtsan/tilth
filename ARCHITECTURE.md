@@ -1086,6 +1086,10 @@ a stderr warning at 3 abandoned threads. The reason this design is
 necessary: aborting a thread mid-tree-sitter-parse is unsafe, so
 "forget about it" is the only correct option short of a full async
 rewrite.
+A worker that panics is caught on its own thread, and the call gets
+the error result "tool panicked during execution"; the server goes on.
+That needs panics to unwind, so the release profile keeps Rust's
+default, and `tests/mcp_panic.rs` checks it in that profile.
 
 **Tool definitions.** `tool_definitions(edit_mode)` returns the schemas
 emitted at `tools/list`. These are the canonical source for argument

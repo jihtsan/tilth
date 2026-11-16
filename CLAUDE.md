@@ -111,7 +111,8 @@ Dockerfile, Make detected but have no tree-sitter grammar (outline returns None)
 ```bash
 cargo build --release        # release build of the tilth binary
 cargo test --workspace       # unit tests of both crates + tilth-core's tests/api.rs
-cargo clippy --workspace --all-targets -- -D warnings  # lint (incl. tests)
+cargo clippy --workspace --all-targets --features tilth/panic-probe -- -D warnings  # lint (incl. tests and the panic probe)
+cargo test --release --features panic-probe --test mcp_panic  # the MCP server survives a panic, in the profile that ships
 cargo fmt --all --check      # format check
 cargo install --path .       # install to ~/.cargo/bin/tilth
 cargo publish --dry-run -p tilth-core  # the library packages on its own
@@ -122,7 +123,7 @@ The toolchain is pinned in `rust-toolchain.toml`, and CI and the release build i
 
 Lints live in `[workspace.lints]` in the root `Cargo.toml` (pedantic, a nursery subset, and restrictions on unwrap, expect, print and unsafe). `clippy.toml` exempts `#[test]` functions and `#[cfg(test)]` modules from the unwrap, expect, print and dbg lints, and nothing else: a helper function in `tests/*.rs` needs its own `#[expect]`. An exception is an `#[expect(lint, reason = "...")]` on the item or statement it excuses, never an `allow`: `allow_attributes` fails the build. A temporary exception's reason names its tracking issue, as in `reason = "split by responsibility in #315"`. A permanent one starts with `by design: `. `tests/expect_reasons.rs` fails on any other reason. Results go to stdout through `write_stdout` (CLI) or the MCP transport's writer, and diagnostics through `diag::emit`; `clippy.toml` forbids `std::io::stdout` and `std::io::stderr` everywhere else. The environment is read only through `config::env_var` and never written; `clippy.toml` forbids `std::env::var`, `var_os`, `vars`, `vars_os`, `set_var` and `remove_var`. The working directory is read only through `config::launch_dir` and never changed; the project root travels as a value, and `clippy.toml` forbids `std::env::current_dir`, `set_current_dir` and `std::path::absolute`. A file's bytes become text only through `tilth_core::source::into_text` (binary on a NUL in the first 512 bytes, else lossy UTF-8); `clippy.toml` forbids `std::str::from_utf8`, `String::from_utf8`, `Read::read_to_string` and `std::io::read_to_string`, and the strict `tilth_core::source::read_to_string` outside the hash-anchored writes and, until #312, the structural diff.
 
-CI runs `fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` and the tilth-core publish dry-run on every push/PR.
+CI runs `fmt --all --check`, `clippy --workspace --all-targets --features tilth/panic-probe -D warnings`, `cargo test --workspace`, the tilth-core publish dry-run and the release-profile panic test on every push/PR.
 
 ## Version bumps
 
