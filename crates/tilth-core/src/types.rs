@@ -48,6 +48,13 @@ impl Lang {
     pub(crate) fn has_hash_comments(self) -> bool {
         crate::lang::spec::spec(self).hash_comments
     }
+
+    /// What a name is made of in this language, as its grammar reads one.
+    /// A lexer that splits names elsewhere never holds names such as Ruby's
+    /// `save!` or Python's `größe`.
+    pub(crate) fn names(self) -> crate::lang::spec::NameRule {
+        crate::lang::spec::spec(self).names
+    }
 }
 
 /// File type as detected by extension. Determines outline strategy.

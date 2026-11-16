@@ -502,6 +502,74 @@ mod tests {
         assert_eq!(callers, ["comment_caller", "docstring_caller"]);
     }
 
+    /// A name is spelled the way its language spells it: with a non-ASCII
+    /// letter, a `$`, a shell function's `-`, or Ruby's and Elixir's
+    /// trailing `?` and `!`. The bloom pre-filter once read only ASCII
+    /// letters, digits and `_`, so it never held such a name and every file
+    /// was skipped before it was parsed (#375).
+    #[test]
+    fn call_sites_of_names_beyond_ascii_letters_digits_and_underscore_are_found() {
+        let ruby = "class Order\n  def persist!\n    self.ok?\n  end\n\n  \
+                    def ok?\n    self.count!=0\n  end\nend\n\norder.persist!\n";
+        let elixir = "defmodule Shop do\n  def show(id) do\n    Repo.get!(id)\n    \
+                      valid?(id)\n  end\nend\n";
+        for (file, source, target, want) in [
+            ("order.rb", ruby, "persist!", &[(11, "<top-level>")][..]),
+            ("order.rb", ruby, "ok?", &[(3, "Order.persist!")]),
+            ("order.rb", ruby, "count", &[(7, "Order.ok?")]),
+            ("shop.ex", elixir, "get!", &[(3, "Shop.show")]),
+            ("shop.ex", elixir, "valid?", &[(4, "Shop.show")]),
+            (
+                "uni.py",
+                "def größe():\n    return 1\n\ndef main():\n    return größe()\n",
+                "größe",
+                &[(5, "main")],
+            ),
+            (
+                "uni.rs",
+                "fn größe() -> u32 { 1 }\nfn main() { größe(); }\n",
+                "größe",
+                &[(2, "main")],
+            ),
+            (
+                "http.js",
+                "function $http() {}\nfunction main() { return $http(); }\n",
+                "$http",
+                &[(2, "main")],
+            ),
+            (
+                "http.ts",
+                "function $http(): void {}\nfunction main() { $http(); }\n",
+                "$http",
+                &[(2, "main")],
+            ),
+            (
+                "A.scala",
+                "object A {\n  def run$(): Int = 1\n  def main(): Int = run$()\n}\n",
+                "run$",
+                &[(3, "A.main")],
+            ),
+            (
+                "A.java",
+                "class A {\n  void run$() {}\n  void main() { run$(); }\n}\n",
+                "run$",
+                &[(3, "A.main")],
+            ),
+            (
+                "run.sh",
+                "my-helper() {\n  echo hi\n}\nmain() {\n  my-helper\n}\n",
+                "my-helper",
+                &[(5, "main")],
+            ),
+        ] {
+            assert_eq!(
+                caller_labels(file, source, target),
+                labels(want),
+                "{file}: {target}"
+            );
+        }
+    }
+
     /// Each `(line, label)` of the call sites of `target` in `file`.
     fn caller_labels(file: &str, source: &str, target: &str) -> Vec<(u32, String)> {
         let dir = tempfile::tempdir().unwrap();

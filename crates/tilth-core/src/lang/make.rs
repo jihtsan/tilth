@@ -1,6 +1,6 @@
 //! Makefile spec. No tree-sitter grammar shipped — outline returns `None`.
 
-use crate::lang::spec::{LangSpec, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Make",
@@ -15,6 +15,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: false,
     hash_comments: true,
+    names: NameRule::PLAIN,
     strip_family: None,
     extract_receiver: None,
     callee_filter: None,

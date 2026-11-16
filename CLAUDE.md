@@ -11,7 +11,7 @@ crates/tilth-core/src/
   lib.rs               Public API: the re-exports at the crate root. Every module is #[doc(hidden)] and shared with the binary.
   lang/
     mod.rs             Shared language infrastructure: detect_file_type(), package_root().
-    spec.rs            Per-language spec table (grammar, definition kinds, callee/sibling queries, stdlib rule, lexer flags).
+    spec.rs            Per-language spec table (grammar, definition kinds, callee/sibling queries, stdlib rule, lexer flags, name rule).
     outline.rs         Tree-sitter outline extraction: outline_language(), walk_top_level(), get_outline_entries().
     treesitter.rs      Shared AST constants: DEFINITION_KINDS, extract_definition_name(), definition_weight(). compiled_query(): the one compiled-Query cache.
     detection.rs       Generated file detection (lockfiles, .min.js) and binary detection.

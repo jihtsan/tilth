@@ -1,6 +1,8 @@
 //! C# language spec.
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = concat!(
     "(invocation_expression function: (identifier) @callee)\n",
@@ -25,6 +27,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: false,
     triple_quoted_strings: true,
     hash_comments: false,
+    names: NameRule::PLAIN,
     strip_family: Some(StripFamily::JavaKotlinCSharp),
     extract_receiver: None,
     callee_filter: None,

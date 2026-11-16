@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use crate::lang::spec::{LangSpec, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = concat!(
     "(call_expression function: (identifier) @callee)\n",
@@ -103,6 +105,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     has_lifetimes: true,
     triple_quoted_strings: false,
     hash_comments: false,
+    names: NameRule::PLAIN,
     strip_family: Some(StripFamily::Rust),
     extract_receiver: None,
     callee_filter: Some(callee_is_call),
