@@ -57,7 +57,7 @@ crates/tilth-core/src/
 │
 ├── search/          Cross-file queries
 │   ├── walk.rs          Walker and ignore policy (WalkConfig, SKIP_DIRS,
-│   │                    .tilthignore, gitignore switch, glob overrides)
+│   │                    .tilthignore, gitignore switch, glob filter)
 │   ├── callers.rs       find_callers_batch: call sites of N symbols in one walk
 │   ├── callees.rs       Resolve function calls inside a definition
 │   ├── callee_query.rs  Per-language tree-sitter call-expression queries,
@@ -457,8 +457,13 @@ every walk visits files by the same policy:
   default `available_parallelism / 2` clamped to `[2, 6]`. `0` lets the
   walker choose. The rayon pool gets the same count.
 
-The glob filter, when present, is applied via `OverrideBuilder` —
-gitignore-style with whitelist, negation (`!`), and brace expansion.
+The glob filter, when present, is parsed by `OverrideBuilder` —
+gitignore-style with whitelist, negation (`!`), and brace expansion —
+and applied as an entry filter on either gitignore setting. It only
+narrows the walk: it never brings back a file or directory that an
+ignore file or `SKIP_DIRS` hides. Handing it to the builder's
+`overrides` would, because an override whitelist outranks every
+ignore file (#381).
 
 ### Symbol search (`symbol.rs`)
 

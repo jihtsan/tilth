@@ -150,7 +150,8 @@ fn include_entry(entry: &ignore::DirEntry) -> bool {
 /// Build a parallel directory walker over `.tilthignore`-filtered files except
 /// known junk directories. Gitignore-style files are opt-in.
 /// A `walk.glob` applies a file-pattern filter (whitelist or negation).
-/// With gitignore enabled, the glob cannot override ignore rules.
+/// The glob only narrows the walk: it never brings back an entry that an
+/// ignore file or `SKIP_DIRS` hides.
 pub fn walker(walk: Walk<'_>) -> Result<ignore::WalkParallel, TilthError> {
     let mut builder = walk_builder(walk)?;
     // The walker reads 0 as "choose for me".
@@ -175,20 +176,17 @@ pub fn walk_builder(walk: Walk<'_>) -> Result<WalkBuilder, TilthError> {
                 query: pattern.to_string(),
                 reason: format!("invalid glob: {e}"),
             })?;
-            if walk.config.respect_gitignore {
-                // A glob narrows the walk without whitelisting ignored entries.
-                builder.filter_entry(move |entry| {
-                    include_entry(entry)
-                        && !overrides
-                            .matched(
-                                entry.path(),
-                                entry.file_type().is_some_and(|ft| ft.is_dir()),
-                            )
-                            .is_ignore()
-                });
-            } else {
-                builder.overrides(overrides);
-            }
+            // A filter, not the builder's overrides: an override whitelist
+            // outranks every ignore file and would bring ignored entries back.
+            builder.filter_entry(move |entry| {
+                include_entry(entry)
+                    && !overrides
+                        .matched(
+                            entry.path(),
+                            entry.file_type().is_some_and(|ft| ft.is_dir()),
+                        )
+                        .is_ignore()
+            });
         }
     }
     Ok(builder)
@@ -382,18 +380,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn walker_negation_excludes_matching_extension() {
-        let scope = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let without_rs = walk_paths(&scope, Some("!*.rs"));
-        for p in &without_rs {
-            assert_ne!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("rs"),
-                ".rs file leaked through negation: {}",
-                p.display()
+    /// A tree with a file pattern and a directory pattern in `.tilthignore`,
+    /// and a `SKIP_DIRS` entry, none of which a glob may bring back.
+    fn glob_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [
+            (".tilthignore", "secret.rs\n*.gen.rs\nprivate/\n"),
+            ("src/visible.rs", "fn visible() {}\n"),
+            ("src/notes.md", "# notes\n"),
+            ("src/secret.rs", "fn secret() {}\n"),
+            ("src/api.gen.rs", "fn generated() {}\n"),
+            ("src/private/key.rs", "fn key() {}\n"),
+            ("lib/other.rs", "fn other() {}\n"),
+            ("node_modules/pkg/index.rs", "fn dependency() {}\n"),
+        ];
+        for (rel, body) in files {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        tmp
+    }
+
+    /// Walk [`glob_fixture`] with `glob` on both gitignore settings and
+    /// compare the files visited with `want`.
+    fn assert_glob_walk(glob: &str, want: &[&str]) {
+        let tmp = glob_fixture();
+        for respect_gitignore in [false, true] {
+            let walk = Walk {
+                glob: Some(glob),
+                ..Walk::new(
+                    tmp.path(),
+                    WalkConfig {
+                        respect_gitignore,
+                        ..WalkConfig::default()
+                    },
+                )
+            };
+            let got: Vec<String> = collect_walk_paths(walker(walk).expect("walker failed"))
+                .iter()
+                .filter_map(|p| p.strip_prefix(tmp.path()).ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                got, want,
+                "glob {glob:?} with respect_gitignore={respect_gitignore}"
             );
         }
+    }
+
+    #[test]
+    fn walker_whitelist_glob_keeps_tilthignore_file_patterns() {
+        assert_glob_walk("*.rs", &["lib/other.rs", "src/visible.rs"]);
+    }
+
+    #[test]
+    fn walker_glob_naming_a_tilthignored_directory_keeps_it_hidden() {
+        // `src/**` matches the `src/private` directory itself.
+        assert_glob_walk("src/**", &["src/notes.md", "src/visible.rs"]);
+    }
+
+    #[test]
+    fn walker_negated_glob_excludes_matches_and_keeps_tilthignore() {
+        assert_glob_walk("!*.md", &[".tilthignore", "lib/other.rs", "src/visible.rs"]);
+    }
+
+    #[test]
+    fn walker_glob_with_directory_part_restricts_to_that_directory() {
+        assert_glob_walk("src/**/*.rs", &["src/visible.rs"]);
+    }
+
+    #[test]
+    fn walker_glob_naming_a_skip_dir_finds_nothing() {
+        assert_glob_walk("node_modules/**", &[]);
     }
 
     #[test]
@@ -458,21 +517,6 @@ mod tests {
             rs_only.len(),
             all.len()
         );
-    }
-
-    #[test]
-    fn walker_path_pattern_restricts_directory() {
-        let scope = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let filtered = walk_paths(scope, Some("src/**/*.rs"));
-        assert!(!filtered.is_empty(), "path pattern should find files");
-        let src_dir = scope.join("src");
-        for p in &filtered {
-            assert!(
-                p.starts_with(&src_dir),
-                "file outside src/ leaked: {}",
-                p.display()
-            );
-        }
     }
 
     #[test]
