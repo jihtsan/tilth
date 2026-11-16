@@ -73,7 +73,7 @@ tilth uses the syntax tree to tell a definition from a mention, and it lists def
 
 An expanded definition ends with a `-- calls --` footer. It lists the functions the definition calls, each with its file, line range and signature. An agent can follow a call chain from there without searching again.
 
-A qualified name such as `Engine::handleHTTPRequest` or `Context.reset` finds the definition that type holds, in search and in grok. A qualifier that names a module or package (`gin.New`, `crate::search::symbol::search`) finds the function at the top level of that module, and `Self::new`, `self.run` or `this.handle` find the name in whichever type holds it.
+A qualified name such as `Engine::handleHTTPRequest` or `Context.reset` finds the definition that type holds, in search and in grok. A qualifier that names a module or package (`gin.New`, `crate::search::symbol::search`) finds the function at the top level of that module, and `Self::new`, `self.run` or `this.handle` find the name in whichever type holds it. Its usages are the lines that spell the qualified name, and the header says so: a call through a receiver, such as `e.run()`, is found by `--callers`.
 
 When a search finds more than it shows, the header says so, for example `10 of 43 matches`. The total counts every match in scope, and the same search gives the same answer every time. Add `--full` to raise the limit from 10 to 100.
 

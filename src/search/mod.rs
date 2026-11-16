@@ -179,6 +179,19 @@ pub(crate) fn sorted(list: std::sync::Mutex<Vec<PathBuf>>) -> Vec<PathBuf> {
     paths
 }
 
+/// A result's header, by the one rule both renderers share.
+fn result_header(result: &SearchResult) -> String {
+    format::search_header(
+        &result.query,
+        &result.scope,
+        result.matches.len(),
+        result.total_found,
+        result.definitions,
+        result.usages,
+        result.usages_by_qualified_text,
+    )
+}
+
 /// The notes under a result: where else a qualified name is defined, and
 /// the files the walk skipped for size although they hold what it looked
 /// for. Empty when there is nothing to say.
@@ -347,14 +360,7 @@ pub fn search_multi_symbol_expanded(
 
     for query in queries {
         let result = symbol::search(query, walk, context, full)?;
-        let mut out = format::search_header(
-            &result.query,
-            &result.scope,
-            result.matches.len(),
-            result.total_found,
-            result.definitions,
-            result.usages,
-        );
+        let mut out = result_header(&result);
         let mut segments: Vec<alloc::Block> = Vec::new();
         format_matches(
             &result.matches,
@@ -1212,15 +1218,7 @@ fn format_search_result(
     expand: usize,
     budget: Option<u64>,
 ) -> Result<String, TilthError> {
-    let header = format::search_header(
-        &result.query,
-        &result.scope,
-        result.matches.len(),
-        result.total_found,
-        result.definitions,
-        result.usages,
-    );
-    let mut out = header;
+    let mut out = result_header(result);
     let mut render_session = RenderSession::new(session);
     let mut expand_remaining = expand;
     let mut expanded_files = HashSet::new();
@@ -3198,6 +3196,87 @@ mod tests {
         .unwrap();
         assert!(out.contains("not searched: big.rs"), "{out}");
         assert!(out.contains("contains `run` or `start` and was"), "{out}");
+    }
+
+    /// A qualified symbol query counts the usages that spell its text, and
+    /// its header says so on the line below. `Engine::run` called as
+    /// `e.run()` read "1 definition, 0 usages", a zero that was never
+    /// counted. The CLI, MCP and comma paths carry the same line.
+    #[test]
+    fn a_qualified_query_says_its_usages_are_its_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("engine.rs"),
+            "pub struct Engine;\nimpl Engine {\n    pub fn run(&self) {}\n}\n\
+             pub fn drive(e: Engine) {\n    e.run();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("svc.py"),
+            "class Cache:\n    def get(self, key):\n        return key\n\n\
+             def use(c):\n    return c.get(\"a\")\n",
+        )
+        .unwrap();
+        let walk = Walk::new(tmp.path(), WalkConfig::default());
+        let cache = OutlineCache::new();
+        let bloom = tilth_core::index::bloom::BloomFilterCache::new();
+        let note = |query: &str, name: &str| {
+            format!(
+                "> Usages match the text `{query}`, not calls through a receiver; callers \
+                 finds those by the name `{name}`."
+            )
+        };
+        let second_line = |out: &str| out.lines().nth(1).unwrap_or_default().to_string();
+
+        for (query, name) in [("Engine::run", "run"), ("Cache.get", "get")] {
+            let cli = search_symbol(query, walk, &cache, false).unwrap();
+            assert!(cli.contains("(1 definition, 0 usages)"), "{cli}");
+            assert_eq!(second_line(&cli), note(query, name), "{cli}");
+
+            let mcp = search_symbol_expanded(
+                query,
+                walk,
+                &cache,
+                &Session::new(),
+                &bloom,
+                0,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+            assert_eq!(second_line(&mcp), note(query, name), "{mcp}");
+        }
+
+        let multi = search_multi_symbol_expanded(
+            &["Engine::run", "Cache.get"],
+            walk,
+            &cache,
+            &Session::new(),
+            &bloom,
+            0,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        for (section, (query, name)) in multi
+            .split("\n\n---\n")
+            .zip([("Engine::run", "run"), ("Cache.get", "get")])
+        {
+            assert_eq!(second_line(section), note(query, name), "{multi}");
+        }
+
+        // What counts its own claim carries no such line: a bare query, a
+        // content search, and a header with no definition, which states no
+        // usage count.
+        let no_owner = search_symbol("Gamma::run", walk, &cache, false).unwrap();
+        assert!(no_owner.contains("0 matches"), "{no_owner}");
+        assert_eq!(second_line(&no_owner), "", "{no_owner}");
+        let bare = search_symbol("run", walk, &cache, false).unwrap();
+        assert_eq!(second_line(&bare), "", "{bare}");
+        let content = search_content("Engine::run", walk, &cache, false).unwrap();
+        assert!(!content.contains("Usages match"), "{content}");
     }
 
     /// The footer block under `heading` in `out`, up to the next blank line.

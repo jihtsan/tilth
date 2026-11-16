@@ -12,6 +12,7 @@ use crate::types::{FileType, Lang};
 
 /// The local files a code file's imports resolve to, read through `cache`'s
 /// parsed tree so an outlined read does not parse the file a second time.
+/// A Rust file's `mod` declarations count as imports of their files.
 /// Returns empty for non-code files, files with no imports, or when all
 /// imports are external.
 #[must_use]
@@ -22,8 +23,8 @@ pub fn resolve_related_files(file_path: &Path, cache: &crate::cache::OutlineCach
         return Vec::new();
     }
     if let Some(parsed) = cache.get_or_parse(file_path) {
-        let imports = imports_in_tree(parsed.tree.root_node(), &parsed.content, parsed.lang);
-        return resolve_imports(file_path, parsed.lang, &imports);
+        let references = references_in_tree(parsed.tree.root_node(), &parsed.content, parsed.lang);
+        return resolve_references(file_path, parsed.lang, &references);
     }
     // The cache holds no tree for this file (no grammar, or over its size
     // cap): read it and parse here.
@@ -39,7 +40,7 @@ pub fn resolve_related_files_with_content(file_path: &Path, content: &str) -> Ve
     let FileType::Code(lang) = detect_file_type_with_content(file_path, content) else {
         return Vec::new();
     };
-    resolve_imports(file_path, lang, &extract_imports(content, lang))
+    resolve_references(file_path, lang, &references(content, lang))
 }
 
 /// Resolve the local imports of the file at `file_path` to existing files,
@@ -47,15 +48,32 @@ pub fn resolve_related_files_with_content(file_path: &Path, content: &str) -> Ve
 /// imports.
 #[must_use]
 pub fn resolve_imports(file_path: &Path, lang: Lang, imports: &[Import]) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    for import in imports {
-        for path in resolve_import(file_path, lang, import) {
-            if !results.contains(&path) {
-                results.push(path);
-            }
+    first_of_each(
+        imports
+            .iter()
+            .flat_map(|import| resolve_import(file_path, lang, import)),
+    )
+}
+
+/// The files `references` of the file at `file_path` name, each once, in
+/// the order they are named.
+fn resolve_references(file_path: &Path, lang: Lang, references: &[Reference]) -> Vec<PathBuf> {
+    first_of_each(
+        references
+            .iter()
+            .flat_map(|reference| reference.resolve(file_path, lang)),
+    )
+}
+
+/// `paths` without repeats, each where it first appears.
+fn first_of_each(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        if !out.contains(&path) {
+            out.push(path);
         }
     }
-    results
+    out
 }
 
 /// The local files one import of the file at `file_path` names, empty when
@@ -63,14 +81,34 @@ pub fn resolve_imports(file_path: &Path, lang: Lang, imports: &[Import]) -> Vec<
 /// local when `pkg/mod.py` sits where Python would look for it (see
 /// `resolve_python_absolute`); `is_external` cannot tell that without the
 /// disk. `from pkg import a, b` names the submodule `pkg/a.py` when there is
-/// one, and `pkg` itself for a name that is no submodule.
+/// one, and `pkg` itself for a name that is no submodule. A Rust import
+/// resolves by the module tree (see `resolve_rust_use`), read as a statement
+/// at the file's top level: the inline modules around a statement are in
+/// the syntax tree, which `resolve_related_files_with_content` reads.
 #[must_use]
 pub fn resolve_import(file_path: &Path, lang: Lang, import: &Import) -> Vec<PathBuf> {
+    resolve_import_within(file_path, lang, import, &[])
+}
+
+/// [`resolve_import`] for a statement inside the Rust inline modules
+/// `within`, outermost first.
+fn resolve_import_within(
+    file_path: &Path,
+    lang: Lang,
+    import: &Import,
+    within: &[String],
+) -> Vec<PathBuf> {
     let Some(dir) = file_path.parent() else {
         return Vec::new();
     };
     if is_external(&import.source, lang) && lang != Lang::Python {
         return Vec::new();
+    }
+    if lang == Lang::Rust {
+        return resolve_rust_use(file_path, &import.source, within)
+            .map(|p| normalize_path(&p))
+            .into_iter()
+            .collect();
     }
     if import.names.is_empty() {
         return resolve(dir, &import.source, lang).into_iter().collect();
@@ -124,13 +162,80 @@ pub struct Import {
     pub names: Vec<String>,
 }
 
+/// A Rust `mod name;`: a module whose code is in a file of its own, which
+/// the declaring file makes part of its crate. By Rust's rules the file is
+/// `name.rs` or `name/mod.rs` in the declaring module's directory, or the
+/// one a `#[path = "…"]` attribute names. An inline `mod name { … }` is no
+/// declaration of this kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModDecl {
+    /// The module's name as the file spells it: `engine`, `r#type`.
+    pub name: String,
+    /// The file a `#[path = "…"]` attribute on the declaration names, as
+    /// written.
+    pub path_attr: Option<String>,
+    /// The inline modules (`mod a { … }`) the declaration sits in,
+    /// outermost first. Empty at a file's top level.
+    pub within: Vec<String>,
+    /// The 1-based line on which the declaration names the module.
+    pub line: u32,
+}
+
+/// Every `mod name;` declaration in the Rust source `content`, in source
+/// order. [`extract_imports`] gives the `use` statements;
+/// [`resolve_related_files_with_content`] resolves both kinds.
+#[must_use]
+pub fn rust_mod_declarations(content: &str) -> Vec<ModDecl> {
+    references(content, Lang::Rust)
+        .into_iter()
+        .filter_map(|reference| match reference {
+            Reference::Mod(decl) => Some(decl),
+            Reference::Import { .. } => None,
+        })
+        .collect()
+}
+
+/// One module a file names, with what resolving it to a file needs.
+pub(crate) enum Reference {
+    /// An import, with the Rust inline modules its statement sits in,
+    /// outermost first. Empty at a file's top level and in other languages.
+    Import { import: Import, within: Vec<String> },
+    /// A Rust `mod` declaration.
+    Mod(ModDecl),
+}
+
+impl Reference {
+    /// The local files this reference of the file at `file_path` names.
+    pub(crate) fn resolve(&self, file_path: &Path, lang: Lang) -> Vec<PathBuf> {
+        match self {
+            Self::Import { import, within } => {
+                resolve_import_within(file_path, lang, import, within)
+            }
+            Self::Mod(decl) => resolve_rust_mod(file_path, decl)
+                .map(|p| normalize_path(&p))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// The 1-based first and last lines of the statement or declaration.
+    pub(crate) fn lines(&self) -> (u32, u32) {
+        match self {
+            Self::Import { import, .. } => (import.start_line, import.end_line),
+            Self::Mod(decl) => (decl.line, decl.line),
+        }
+    }
+}
+
 /// Every module `content` imports, one [`Import`] per module, in source order.
 ///
 /// In Go, Rust, Python, JavaScript, TypeScript, Scala, Elixir, Java,
 /// Kotlin, PHP, C# and Swift, statements come from the syntax tree, so an
 /// import-shaped line inside a string is not one and an alias is not part
 /// of a source. A JavaScript or TypeScript re-export (`export … from "m"`)
-/// imports `m` too. In C,
+/// imports `m` too. A Rust `mod m;` is no statement; see
+/// [`rust_mod_declarations`]. In C,
 /// C++ and Bash, where an import is one line naming one file, each line
 /// `is_import_line` accepts gives one import, its source read by
 /// `extract_import_source`. A statement that does not spell its module
@@ -138,8 +243,32 @@ pub struct Import {
 /// imports tilth reads give none.
 #[must_use]
 pub fn extract_imports(content: &str, lang: Lang) -> Vec<Import> {
+    only_imports(references(content, lang))
+}
+
+/// [`extract_imports`] over a tree the caller has already parsed from
+/// `content` with `lang`'s grammar, so a caller that has one parses once.
+#[must_use]
+pub fn imports_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Vec<Import> {
+    only_imports(references_in_tree(root, content, lang))
+}
+
+/// The imports among `references`.
+fn only_imports(references: Vec<Reference>) -> Vec<Import> {
+    references
+        .into_iter()
+        .filter_map(|reference| match reference {
+            Reference::Import { import, .. } => Some(import),
+            Reference::Mod(_) => None,
+        })
+        .collect()
+}
+
+/// Every module `content` names, in source order: its imports, as
+/// [`extract_imports`] reads them, and in Rust its `mod` declarations.
+pub(crate) fn references(content: &str, lang: Lang) -> Vec<Reference> {
     if !reads_statements_from_tree(lang) {
-        return line_imports(content, lang);
+        return top_level(line_imports(content, lang));
     }
     let Some(language) = outline_language(lang) else {
         return Vec::new();
@@ -151,15 +280,13 @@ pub fn extract_imports(content: &str, lang: Lang) -> Vec<Import> {
     let Some(tree) = parser.parse(content, None) else {
         return Vec::new();
     };
-    imports_in_tree(tree.root_node(), content, lang)
+    references_in_tree(tree.root_node(), content, lang)
 }
 
-/// [`extract_imports`] over a tree the caller has already parsed from
-/// `content` with `lang`'s grammar, so a caller that has one parses once.
-#[must_use]
-pub fn imports_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Vec<Import> {
+/// [`references`] over a tree already parsed from `content`.
+fn references_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Vec<Reference> {
     if !reads_statements_from_tree(lang) {
-        return line_imports(content, lang);
+        return top_level(line_imports(content, lang));
     }
     let Some(query) = statement_query(lang) else {
         return Vec::new();
@@ -178,6 +305,15 @@ pub fn imports_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Ve
     while let Some(found) = matches.next() {
         for capture in found.captures() {
             let node = capture.node;
+            if lang == Lang::Rust && node.kind() == "mod_item" {
+                out.extend(rust_mod_declaration(node, content).map(Reference::Mod));
+                continue;
+            }
+            let within = if lang == Lang::Rust {
+                rust_inline_modules(node, content)
+            } else {
+                Vec::new()
+            };
             for (source, line) in statement_modules(node, content, lang).into_iter().flatten() {
                 if source.is_empty() {
                     continue;
@@ -187,17 +323,32 @@ pub fn imports_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Ve
                 } else {
                     Vec::new()
                 };
-                out.push(Import {
+                let import = Import {
                     source,
                     line,
                     start_line: line_of(node),
                     end_line: last_line_of(node),
                     names,
+                };
+                out.push(Reference::Import {
+                    import,
+                    within: within.clone(),
                 });
             }
         }
     }
     out
+}
+
+/// `imports`, each at the top level of its file.
+fn top_level(imports: Vec<Import>) -> Vec<Reference> {
+    imports
+        .into_iter()
+        .map(|import| Reference::Import {
+            import,
+            within: Vec::new(),
+        })
+        .collect()
 }
 
 /// The query matching the node kinds that can be an import statement in
@@ -209,7 +360,7 @@ pub fn imports_in_tree(root: tree_sitter::Node, content: &str, lang: Lang) -> Ve
 fn statement_query(lang: Lang) -> Option<&'static tree_sitter::Query> {
     let pattern = match lang {
         Lang::Go | Lang::Scala | Lang::Java | Lang::Swift => "(import_declaration) @statement",
-        Lang::Rust => "(use_declaration) @statement",
+        Lang::Rust => "[(use_declaration) (mod_item)] @statement",
         Lang::Python => {
             "[(import_statement) (import_from_statement) (future_import_statement)] @statement"
         }
@@ -392,6 +543,66 @@ fn rust_use_tree(node: tree_sitter::Node, prefix: &str, src: &str, out: &mut Vec
         kind if kind.ends_with("comment") => {}
         _ => out.push((join_path(prefix, &compact(node, src), "::"), line_of(node))),
     }
+}
+
+/// Rust: the declaration a `mod_item` is when it has no body. `mod foo { … }`
+/// holds its module inline and declares no file.
+fn rust_mod_declaration(item: tree_sitter::Node, src: &str) -> Option<ModDecl> {
+    if item.child_by_field_name("body").is_some() {
+        return None;
+    }
+    let name = item.child_by_field_name("name")?;
+    Some(ModDecl {
+        name: text(name, src).to_string(),
+        path_attr: rust_path_attribute(item, src),
+        within: rust_inline_modules(item, src),
+        line: line_of(name),
+    })
+}
+
+/// Rust: the file a `#[path = "…"]` attribute above `item` names. The
+/// attributes are the item's preceding siblings in tree-sitter-rust, and
+/// doc comments may sit between them.
+fn rust_path_attribute(item: tree_sitter::Node, src: &str) -> Option<String> {
+    let mut sibling = item.prev_sibling();
+    while let Some(node) = sibling {
+        match node.kind() {
+            "attribute_item" => {
+                let value = node
+                    .named_child(0)
+                    .filter(|attribute| {
+                        attribute
+                            .named_child(0)
+                            .is_some_and(|name| text(name, src) == "path")
+                    })
+                    .and_then(|attribute| attribute.child_by_field_name("value"))
+                    .filter(|value| value.kind() == "string_literal");
+                if let Some(value) = value {
+                    return Some(unquote(value, src));
+                }
+            }
+            kind if kind.ends_with("comment") => {}
+            _ => return None,
+        }
+        sibling = node.prev_sibling();
+    }
+    None
+}
+
+/// Rust: the names of the inline modules `node` sits in, outermost first.
+fn rust_inline_modules(node: tree_sitter::Node, src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut ancestor = node.parent();
+    while let Some(module) = ancestor {
+        if module.kind() == "mod_item" {
+            if let Some(name) = module.child_by_field_name("name") {
+                names.push(text(name, src).to_string());
+            }
+        }
+        ancestor = module.parent();
+    }
+    names.reverse();
+    names
 }
 
 /// Scala: `import a.b, c.d` gives two paths; `import a.{b, c => d}` gives
@@ -663,12 +874,13 @@ pub fn is_external(source: &str, lang: Lang) -> bool {
 
 fn resolve(dir: &Path, source: &str, lang: Lang) -> Option<PathBuf> {
     let raw = match lang {
-        Lang::Rust => resolve_rust(dir, source),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => resolve_js(dir, source),
         Lang::Python => resolve_python(dir, source),
         Lang::C | Lang::Cpp => resolve_c_include(dir, source),
         Lang::Bash => resolve_bash(dir, source),
-        // Elixir, Go, Java, etc. — module-to-file mapping requires build system conventions.
+        // Rust resolves by its module tree, in `resolve_rust_use` and
+        // `resolve_rust_mod`. Elixir, Go, Java, etc. — module-to-file
+        // mapping requires build system conventions.
         _ => None,
     };
     raw.map(|p| normalize_path(&p))
@@ -703,17 +915,93 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 // --- Rust ---
 
-fn resolve_rust(dir: &Path, source: &str) -> Option<PathBuf> {
+/// The file a Rust `use` path in `file` names, by Rust's module tree, for
+/// a statement inside the inline modules `within`. `self` is the module the
+/// statement sits in, whose child modules live in its `module_scope`, and
+/// each `super` is one directory up. `crate::` paths start at the nearest
+/// `src/`. Any other path names another crate.
+fn resolve_rust_use(file: &Path, source: &str, within: &[String]) -> Option<PathBuf> {
     if let Some(rest) = source.strip_prefix("crate::") {
-        let src_dir = find_src_ancestor(dir)?;
-        try_rust_path(src_dir, rest)
-    } else if let Some(rest) = source.strip_prefix("self::") {
-        try_rust_path(dir, rest)
-    } else if let Some(rest) = source.strip_prefix("super::") {
-        try_rust_path(dir.parent()?, rest)
-    } else {
-        None
+        return try_rust_path(find_src_ancestor(file.parent()?)?, rest);
     }
+    if !(source.starts_with("self::") || source.starts_with("super::")) {
+        return None;
+    }
+    let mut base = module_scope(file, within)?;
+    let mut rest = source.strip_prefix("self::").unwrap_or(source);
+    while let Some(after) = rest.strip_prefix("super::") {
+        base = base.parent()?.to_path_buf();
+        rest = after;
+    }
+    try_rust_path(&base, rest)
+}
+
+/// The file a `mod` declaration in `file` names: `name.rs` or
+/// `name/mod.rs` in the declaring module's `module_scope`. A `#[path]`
+/// names its file relative to the declaring file's directory, or, inside
+/// inline modules, relative to theirs.
+fn resolve_rust_mod(file: &Path, decl: &ModDecl) -> Option<PathBuf> {
+    let scope = module_scope(file, &decl.within)?;
+    match &decl.path_attr {
+        Some(path) => {
+            let base = if decl.within.is_empty() {
+                file.parent()?
+            } else {
+                &scope
+            };
+            let file = base.join(path);
+            file.is_file().then_some(file)
+        }
+        None => try_rust_module(&scope.join(decl.name.trim_start_matches("r#"))),
+    }
+}
+
+/// The directory holding the files of the child modules of the module
+/// that the inline modules `within` (outermost first) make inside `file`:
+/// `file`'s `module_dir`, one level down for each inline module.
+fn module_scope(file: &Path, within: &[String]) -> Option<PathBuf> {
+    Some(
+        within
+            .iter()
+            .fold(module_dir(file)?, |dir, module| dir.join(module)),
+    )
+}
+
+/// The directory holding the files of the modules `file` declares: a
+/// crate root's or a `mod.rs`'s own directory, and for any other `x.rs`
+/// the directory `x/` beside it.
+fn module_dir(file: &Path) -> Option<PathBuf> {
+    let dir = file.parent()?;
+    if file.file_name().is_some_and(|name| name == "mod.rs") || is_crate_root(file) {
+        Some(dir.to_path_buf())
+    } else {
+        Some(dir.join(file.file_stem()?))
+    }
+}
+
+/// Whether `file` is a crate root by Cargo's conventions: a `main.rs` or
+/// `lib.rs`, a package's `build.rs`, or a file directly in a package's
+/// `src/bin`, `tests`, `examples` or `benches`.
+fn is_crate_root(file: &Path) -> bool {
+    let (Some(name), Some(dir)) = (file.file_name(), file.parent()) else {
+        return false;
+    };
+    if name == "main.rs" || name == "lib.rs" {
+        return true;
+    }
+    let package = if name == "build.rs" {
+        Some(dir)
+    } else {
+        match dir.file_name().and_then(|n| n.to_str()) {
+            Some("tests" | "examples" | "benches") => dir.parent(),
+            Some("bin") => dir
+                .parent()
+                .filter(|src| src.file_name().is_some_and(|n| n == "src"))
+                .and_then(Path::parent),
+            _ => None,
+        }
+    };
+    package.is_some_and(|package| package.join("Cargo.toml").is_file())
 }
 
 /// Try progressively shorter paths until one resolves.
@@ -931,9 +1219,8 @@ mod tests {
         }
     }
 
-    /// The files `rel` (a Python file under `root`) imports, relative to
-    /// `root`.
-    fn python_related(root: &Path, rel: &str) -> Vec<String> {
+    /// The files `rel` (a file under `root`) imports, relative to `root`.
+    fn related(root: &Path, rel: &str) -> Vec<String> {
         let file = root.join(rel);
         let content = fs::read_to_string(&file).unwrap();
         resolve_related_files_with_content(&file, &content)
@@ -972,11 +1259,11 @@ mod tests {
             ],
         );
         assert_eq!(
-            python_related(&root, "pkg/a.py"),
+            related(&root, "pkg/a.py"),
             ["pkg/sub/mod.py", "pkg/other.py"]
         );
         assert_eq!(
-            python_related(&root, "pkg/b.py"),
+            related(&root, "pkg/b.py"),
             ["pkg/sub/mod.py", "pkg/sub/__init__.py"]
         );
     }
@@ -1006,16 +1293,13 @@ mod tests {
                 ("loose/inner/pkg2/a.py", "import util\nimport pkg2\n"),
             ],
         );
+        assert_eq!(related(&root.join("proj"), "pkg/a.py"), ["pkg/util.py"]);
         assert_eq!(
-            python_related(&root.join("proj"), "pkg/a.py"),
-            ["pkg/util.py"]
-        );
-        assert_eq!(
-            python_related(&root.join("proj"), "scripts/run.py"),
+            related(&root.join("proj"), "scripts/run.py"),
             ["scripts/helper.py"]
         );
         assert_eq!(
-            python_related(&root.join("loose"), "inner/pkg2/a.py"),
+            related(&root.join("loose"), "inner/pkg2/a.py"),
             ["inner/pkg2/__init__.py"]
         );
     }
@@ -1073,6 +1357,108 @@ mod tests {
         let content = "use crate::{core, seams::git};\nuse std::fs;\n";
         let related = resolve_related_files_with_content(&src.join("main.rs"), content);
         assert_eq!(related, [src.join("core.rs"), src.join("seams/git.rs")]);
+    }
+
+    /// A bodiless `mod` declares a module whose code is in a file of its
+    /// own, so it imports that file. A crate root (`main.rs`, `lib.rs`, a
+    /// target Cargo finds by its place in a package) and a `mod.rs` hold
+    /// their modules beside them; any other `x.rs` holds them under `x/`.
+    /// `#[path]` names the file, and an inline module adds its name to the
+    /// directory. Matching `use` alone, a crate that reaches its modules by
+    /// `mod` and paths imported nothing.
+    #[test]
+    fn rust_mod_declarations_import_their_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write_tree(
+            &root,
+            &[
+                ("Cargo.toml", "[package]\nname = \"m\"\n"),
+                (
+                    "src/main.rs",
+                    "mod foo;\npub mod bar;\n/// Doc.\n#[cfg(unix)]\n#[path = \"sys/unix.rs\"]\nmod sys;\nmod inline {\n    fn f() {}\n}\nmod outer {\n    pub(crate) mod nested;\n}\nmod missing;\nfn main() {}\n",
+                ),
+                ("src/foo.rs", "mod child;\n"),
+                ("src/foo/child.rs", ""),
+                ("src/child.rs", ""),
+                ("src/bar/mod.rs", "mod baz;\n"),
+                ("src/bar/baz.rs", ""),
+                ("src/sys/unix.rs", ""),
+                ("src/sys.rs", ""),
+                ("src/inline.rs", ""),
+                ("src/outer/nested.rs", ""),
+                ("tests/it.rs", "mod common;\n"),
+                ("tests/common/mod.rs", ""),
+            ],
+        );
+        assert_eq!(
+            related(&root, "src/main.rs"),
+            [
+                "src/foo.rs",
+                "src/bar/mod.rs",
+                "src/sys/unix.rs",
+                "src/outer/nested.rs"
+            ]
+        );
+        assert_eq!(related(&root, "src/foo.rs"), ["src/foo/child.rs"]);
+        assert_eq!(related(&root, "src/bar/mod.rs"), ["src/bar/baz.rs"]);
+        assert_eq!(related(&root, "tests/it.rs"), ["tests/common/mod.rs"]);
+    }
+
+    /// A bodiless `mod` declares its module's file, with the `#[path]` and
+    /// the inline modules it sits in; an inline module declares none. Both
+    /// stay out of the import statements.
+    #[test]
+    fn rust_mod_declarations_carry_their_path_and_scope() {
+        let rust = "use a::b;\n#[path = \"x.rs\"]\nmod c;\nmod d { mod e; }\nmod f {}\n";
+        let decls: Vec<(String, Option<String>, Vec<String>, u32)> = rust_mod_declarations(rust)
+            .into_iter()
+            .map(|d| (d.name, d.path_attr, d.within, d.line))
+            .collect();
+        assert_eq!(
+            decls,
+            [
+                ("c".to_string(), Some("x.rs".to_string()), vec![], 3),
+                ("e".to_string(), None, vec!["d".to_string()], 4),
+            ]
+        );
+        let sources: Vec<String> = extract_imports(rust, Lang::Rust)
+            .into_iter()
+            .map(|i| i.source)
+            .collect();
+        assert_eq!(sources, ["a::b"]);
+    }
+
+    /// `self` and `super` are the module a statement sits in and its
+    /// parent. A file `a.rs` is the module `a`, whose children are under
+    /// `a/`; read from the file's own directory, `self::b` named `src/b.rs`
+    /// and `super::c` looked above `src/`.
+    #[test]
+    fn rust_self_and_super_follow_the_module_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write_tree(
+            &root,
+            &[
+                (
+                    "src/a.rs",
+                    "mod b;\nuse self::b::X;\nuse super::c::Y;\nmod tests {\n    use super::b::Z;\n    use super::super::d::W;\n}\n",
+                ),
+                ("src/a/b.rs", ""),
+                ("src/b.rs", ""),
+                ("src/c.rs", ""),
+                ("src/d.rs", ""),
+                ("src/lib.rs", "mod a;\nmod tests {\n    use super::c::Y;\n}\n"),
+                ("src/x/mod.rs", "use super::d::W;\nuse self::e::V;\n"),
+                ("src/x/e.rs", ""),
+            ],
+        );
+        assert_eq!(
+            related(&root, "src/a.rs"),
+            ["src/a/b.rs", "src/c.rs", "src/d.rs"]
+        );
+        assert_eq!(related(&root, "src/lib.rs"), ["src/a.rs", "src/c.rs"]);
+        assert_eq!(related(&root, "src/x/mod.rs"), ["src/d.rs", "src/x/e.rs"]);
     }
 
     /// An import written across several lines names its module on the last
