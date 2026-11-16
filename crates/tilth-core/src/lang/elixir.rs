@@ -2,7 +2,9 @@
 //! every definition is a `call` node whose `target` identifier is the keyword
 //! (`def`, `defmodule`, …), so the default field-name extractor does not apply.
 //! The definition detection + name extraction + weight live here and are wired
-//! into [`SPEC`] via its `definition_kinds` / `definitions` fields.
+//! into [`SPEC`] via its `definition_kinds` / `definitions` fields. The same
+//! shape makes a function's head look like a call, which `callee_is_call`
+//! rejects.
 
 use crate::lang::spec::{DefinitionOps, LangSpec, NameRule, StdlibRule};
 use crate::lang::treesitter::{
@@ -16,10 +18,9 @@ const CALLEE_QUERY: &str = concat!(
 
 /// Elixir call-node target identifiers that define named symbols.
 /// This is the complete set used for definition detection in symbol search/index.
-/// See also `ELIXIR_DEF_KEYWORDS` in `outline.rs` which is the subset of
-/// function-like keywords (excludes container keywords like `defmodule`,
-/// `defprotocol`, `defimpl`, `defstruct`, `defexception` that have their own
-/// outline handling).
+/// See also [`ELIXIR_FUNCTION_TARGETS`], the subset that defines a function
+/// (excludes container keywords like `defmodule`, `defprotocol`, `defimpl`,
+/// `defstruct`, `defexception` that have their own outline handling).
 pub(crate) const ELIXIR_DEFINITION_TARGETS: &[&str] = &[
     "defmodule",
     "def",
@@ -34,6 +35,54 @@ pub(crate) const ELIXIR_DEFINITION_TARGETS: &[&str] = &[
     "defprotocol",
     "defimpl",
 ];
+
+/// The definition keywords whose first argument is a function head:
+/// `def greet(name)`, `defguard is_even(n) when ...`, `defdelegate count(l), to: ...`.
+pub(crate) const ELIXIR_FUNCTION_TARGETS: &[&str] = &[
+    "def",
+    "defp",
+    "defmacro",
+    "defmacrop",
+    "defguard",
+    "defguardp",
+    "defdelegate",
+];
+
+/// Drop the `@callee` of a function head. A definition is a `call` whose
+/// first argument is the head, and the head of `def build(attrs)` is a
+/// `build(attrs)` call, so the query's first pattern matches it although
+/// nothing calls `build` there. A guard wraps the head as the left operand
+/// of `when`, which is unwrapped the way the definition-name extractor
+/// unwraps it. Calls in a guard's right operand, in default arguments and in
+/// the body are calls, and pass.
+fn callee_is_call(node: &tree_sitter::Node, source: &[u8]) -> bool {
+    let Some(call) = node.parent().filter(|p| p.kind() == "call") else {
+        return true;
+    };
+    !is_function_head(call, source)
+}
+
+/// Whether `call` is the head of a function definition.
+fn is_function_head(call: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut head = call;
+    while let Some(guard) = head
+        .parent()
+        .filter(|p| p.kind() == "binary_operator" && p.child_by_field_name("left") == Some(head))
+    {
+        head = guard;
+    }
+    let Some(args) = head.parent().filter(|p| p.kind() == "arguments") else {
+        return false;
+    };
+    let mut cursor = args.walk();
+    if args.named_children(&mut cursor).next() != Some(head) {
+        return false;
+    }
+    args.parent()
+        .and_then(|definition| definition.child_by_field_name("target"))
+        .and_then(|keyword| keyword.utf8_text(source).ok())
+        .is_some_and(|keyword| ELIXIR_FUNCTION_TARGETS.contains(&keyword))
+}
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Elixir",
@@ -54,7 +103,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     },
     strip_family: None,
     extract_receiver: None,
-    callee_filter: None,
+    callee_filter: Some(callee_is_call),
     test_site: None,
     definitions: DefinitionOps {
         extract_name: extract_elixir_definition_name,
@@ -133,7 +182,7 @@ pub(crate) fn extract_elixir_definition_name(
             }
             None
         }
-        "def" | "defp" | "defmacro" | "defmacrop" | "defguard" | "defguardp" | "defdelegate" => {
+        kw if ELIXIR_FUNCTION_TARGETS.contains(&kw) => {
             // First named child is:
             //   `call`              — normal: `def greet(name)`
             //   `identifier`        — no-arg: `def bar, do: :ok`
