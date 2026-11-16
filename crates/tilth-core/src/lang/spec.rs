@@ -56,6 +56,9 @@ pub struct LangSpec {
     pub hash_comments: bool,
     /// What a name is made of (`Lang::names`).
     pub names: NameRule,
+    /// How a string holds code, or `None` when no string does
+    /// (`Lang::interpolation`).
+    pub interpolation: Option<Interpolation>,
     /// Coarse comment-syntax family for cognitive-load stripping (`StripLang`).
     pub strip_family: Option<StripFamily>,
     /// Go-only: extract the method receiver name from file content.
@@ -152,6 +155,31 @@ impl NameRule {
         let mut chars = body.chars();
         chars.next().is_some_and(|c| self.starts(c)) && chars.all(|c| self.continues(c))
     }
+}
+
+/// How a language writes code inside a string: a JavaScript template's
+/// `${…}`, Ruby's `#{…}`, Swift's `\(…)`. Each such hole is code, read to
+/// the bracket that closes it; the rest of the string is text.
+#[derive(Debug, Clone, Copy)]
+pub struct Interpolation {
+    /// The quotes whose strings hold code.
+    pub quotes: &'static [u8],
+    /// Whether the source before such a quote marks its string as one that
+    /// holds code: `f"…"` in Python, `$"…"` in C#. `None` when every string
+    /// opened by one of `quotes` does.
+    pub marked: Option<fn(&[u8]) -> bool>,
+    /// The ways a hole opens.
+    pub holes: &'static [Hole],
+}
+
+/// One way a hole opens in a string, and the byte that closes it.
+#[derive(Debug, Clone, Copy)]
+pub struct Hole {
+    /// The text that opens the hole, ending in its opening bracket when it
+    /// has one: `${`, `\(`.
+    pub opens: &'static [u8],
+    /// The byte that closes the hole: `}`, `)`, or a shell's `` ` ``.
+    pub closes: u8,
 }
 
 /// Coarse 6-way grouping of comment / log syntax for `strip::strip_noise`.
@@ -362,6 +390,26 @@ mod tests {
                         | Lang::Php
                 ),
                 "{lang:?} hash comment flag mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn interpolation_languages() {
+        for &lang in mod_all_langs_for_test() {
+            assert_eq!(
+                spec(lang).interpolation.is_some(),
+                !matches!(
+                    lang,
+                    Lang::Rust
+                        | Lang::Go
+                        | Lang::Java
+                        | Lang::C
+                        | Lang::Cpp
+                        | Lang::Dockerfile
+                        | Lang::Make
+                ),
+                "{lang:?} interpolation mismatch"
             );
         }
     }

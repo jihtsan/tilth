@@ -1,7 +1,8 @@
 //! JavaScript language spec. Shares callee/sibling queries with TS/TSX.
 
 use crate::lang::spec::{
-    LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, StripFamily, DEFAULT_DEFS,
+    DEFAULT_DEF_KINDS,
 };
 
 /// Callee query shared by JavaScript, TypeScript, and TSX.
@@ -20,6 +21,17 @@ pub(crate) const NAMES: NameRule = NameRule {
     marks: &[],
 };
 
+/// Interpolation shared by JavaScript, TypeScript, and TSX: a template
+/// literal's `${…}`.
+pub(crate) const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"`",
+    marked: None,
+    holes: &[Hole {
+        opens: b"${",
+        closes: b'}',
+    }],
+};
+
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "JavaScript",
     extensions: &["js", "jsx"],
@@ -34,6 +46,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: false,
     hash_comments: false,
     names: NAMES,
+    interpolation: Some(INTERPOLATION),
     strip_family: Some(StripFamily::JsTs),
     extract_receiver: None,
     callee_filter: None,

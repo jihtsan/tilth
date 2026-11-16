@@ -1,6 +1,8 @@
 //! Swift language spec.
 
-use crate::lang::spec::{LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS};
+use crate::lang::spec::{
+    Hole, Interpolation, LangSpec, NameRule, StdlibRule, DEFAULT_DEFS, DEFAULT_DEF_KINDS,
+};
 
 const CALLEE_QUERY: &str = concat!(
     "(call_expression (simple_identifier) @callee)\n",
@@ -9,6 +11,16 @@ const CALLEE_QUERY: &str = concat!(
 
 const SIBLING_QUERY: &str =
     "(navigation_expression target: (self_expression) suffix: (navigation_suffix suffix: (simple_identifier) @ref))\n";
+
+/// `\(…)` in a string, single-line or multi-line.
+const INTERPOLATION: Interpolation = Interpolation {
+    quotes: b"\"",
+    marked: None,
+    holes: &[Hole {
+        opens: b"\\(",
+        closes: b')',
+    }],
+};
 
 pub(crate) const SPEC: LangSpec = LangSpec {
     display: "Swift",
@@ -24,6 +36,7 @@ pub(crate) const SPEC: LangSpec = LangSpec {
     triple_quoted_strings: true,
     hash_comments: false,
     names: NameRule::PLAIN,
+    interpolation: Some(INTERPOLATION),
     strip_family: None,
     extract_receiver: None,
     callee_filter: None,
