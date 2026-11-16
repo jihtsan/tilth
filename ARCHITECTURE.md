@@ -656,12 +656,22 @@ machinery:
   module tree: a bodiless `mod foo;` imports `foo.rs` or `foo/mod.rs`
   (or its `#[path]` file), beside a crate root or `mod.rs` and under
   `x/` for any other `x.rs`, and `self::` and `super::` start from the
-  same directories. `format_deps` (binary)
+  same directories. Go, Java, Kotlin and Scala imports do not resolve
+  to files, but a file in the target's package reaches its names
+  without one: `same_package` marks a Go file of the target's
+  directory with the same `package` clause, and a Java, Kotlin or
+  Scala file that declares the same package, each read from the syntax
+  tree. `importable` says whether an import tilth resolves can name the
+  target at all: never in those languages, nor for a C or C++ source
+  file, since an include names a header. `format_deps` (binary)
   does the human output: each "Used by" section lists the dependents
-  an import confirms first, then those found by a call alone, and each
-  dependent's first row says which (`imports it`, `by name`). It lists
-  the first 15 of the first kind and 5 of the second, or all of them
-  with `--full`, and says how many it left out, under a budget too.
+  an import or the package confirms first, then those found by a call
+  alone, and each dependent's first row says which (`imports it`,
+  `same package`, `by name`). It lists the first 15 of the first kind
+  and 5 of the second, or all of them with `--full` (`full` on
+  `tilth_deps`), and says how many of each it left out, under a budget
+  too. Where the target is not `importable`, it lists every dependent
+  found by name, since nothing tells them from real ones.
   The header counts the dependents found by a call alone, and the note
   that explains them stays with it under any budget. The external-dep stdlib
   heuristic (`is_stdlib`) is per-language; module-path validation

@@ -8,21 +8,67 @@ use std::path::Path;
 use crate::format::{and_more, noun};
 use tilth_core::search::deps::{Dependent, DepsResult, LocalDep, MAX_EXPORTED_SYMBOLS};
 
-/// Dependents an import confirms listed before the rest are counted, unless
-/// the caller asks for the full list.
+/// Dependents an import or the target's package confirms listed before the
+/// rest are counted, unless the caller asks for the full list.
 const MAX_DEPENDENTS: usize = 15;
 
 /// Dependents found by name only listed before the rest are counted, unless
-/// the caller asks for the full list.
+/// the caller asks for the full list or no import can name the target.
 const MAX_BY_NAME: usize = 5;
+
+/// How a dependent is known to reach the target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// One of its imports names the target.
+    Imports,
+    /// It is in the target's package, which needs no import.
+    SamePackage,
+    /// It calls a name the target defines, which another definition may own.
+    ByName,
+}
+
+impl Link {
+    /// In the order the lines counting unlisted dependents come.
+    const ALL: [Self; 3] = [Self::Imports, Self::SamePackage, Self::ByName];
+
+    fn of(dependent: &Dependent) -> Self {
+        if !dependent.import_lines.is_empty() {
+            Self::Imports
+        } else if dependent.same_package {
+            Self::SamePackage
+        } else {
+            Self::ByName
+        }
+    }
+
+    /// The mark on the dependent's first row.
+    const fn mark(self) -> &'static str {
+        match self {
+            Self::Imports => "imports it",
+            Self::SamePackage => "same package",
+            Self::ByName => "by name",
+        }
+    }
+
+    /// The dependents of this kind, in the line that counts unlisted ones.
+    const fn unlisted(self) -> &'static str {
+        match self {
+            Self::Imports => "importing it",
+            Self::SamePackage => "in its package",
+            Self::ByName => "by name only",
+        }
+    }
+}
 
 /// Format a `DepsResult` as a compact, readable string.
 ///
-/// Each "Used by" section lists the dependents an import confirms first,
-/// then those found by name only, and each dependent's first row says which
-/// it is. `full` lists every dependent; otherwise the first `MAX_DEPENDENTS`
-/// that import the target and the first `MAX_BY_NAME` found by name are
-/// listed and the rest counted.
+/// Each "Used by" section lists the dependents an import or the target's
+/// package confirms first, then those found by name only, and each
+/// dependent's first row says which it is. `full` lists every dependent;
+/// otherwise the first `MAX_DEPENDENTS` confirmed ones and the first
+/// `MAX_BY_NAME` found by name are listed and the rest counted. Where no
+/// import can name the target, every dependent found by name is listed:
+/// nothing tells them from real ones.
 ///
 /// Budget truncation priority (when `budget` tokens is too tight):
 /// 1. Truncate "Used by" entries (keep header count)
@@ -35,8 +81,15 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
     // The result's paths are canonical; shown relative to the same scope.
     let scope = &scope.canonicalize().unwrap_or_else(|_| scope.to_path_buf());
     let dep_count = result.used_by.len();
-    let (imported, by_name): (Vec<&Dependent>, Vec<&Dependent>) =
-        result.used_by.iter().partition(|d| is_imported(d));
+    let (confirmed, by_name): (Vec<&Dependent>, Vec<&Dependent>) = result
+        .used_by
+        .iter()
+        .partition(|d| Link::of(d) != Link::ByName);
+    let by_name_cap = if result.importable {
+        MAX_BY_NAME
+    } else {
+        usize::MAX
+    };
     let cap = |deps: &[&Dependent], max: usize| {
         if full {
             deps.len()
@@ -44,12 +97,14 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
             deps.len().min(max)
         }
     };
-    let imported_listed = &imported[..cap(&imported, MAX_DEPENDENTS)];
-    let by_name_listed = &by_name[..cap(&by_name, MAX_BY_NAME)];
+    let listed: Vec<&Dependent> = confirmed[..cap(&confirmed, MAX_DEPENDENTS)]
+        .iter()
+        .chain(&by_name[..cap(&by_name, by_name_cap)])
+        .copied()
+        .collect();
     let section = |is_test: bool| -> Vec<&Dependent> {
-        imported_listed
+        listed
             .iter()
-            .chain(by_name_listed)
             .filter(|d| d.is_test == is_test)
             .copied()
             .collect()
@@ -88,14 +143,6 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
     let uses_external_section = format_uses_external(&result.uses_external);
     let used_by_section = format_used_by(&prod_deps, scope, "## Used by");
     let used_by_tests_section = format_used_by(&test_deps, scope, "## Used by (tests)");
-    let unlisted = |imported_shown: usize, by_name_shown: usize| {
-        unlisted_dependents(
-            (imported.len(), imported_shown),
-            (by_name.len(), by_name_shown),
-        )
-    };
-    let prod_imported = prod_deps.iter().filter(|d| is_imported(d)).count();
-
     let unsearched = unsearched_note(result);
 
     // Full output
@@ -105,7 +152,7 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
         &uses_external_section,
         &used_by_section,
         &used_by_tests_section,
-        &unlisted(imported_listed.len(), by_name_listed.len()),
+        &unlisted_dependents(&result.used_by, &listed),
         &unsearched,
     ]);
     let full_tokens = crate::types::estimate_tokens(full_output.len() as u64) as usize;
@@ -120,7 +167,7 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
                 &uses_local_section,
                 &uses_external_section,
                 &used_by_section,
-                &unlisted(prod_imported, prod_deps.len() - prod_imported),
+                &unlisted_dependents(&result.used_by, &prod_deps),
                 dep_count,
                 &unsearched,
                 b,
@@ -137,13 +184,6 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
 
     let token_est = crate::types::estimate_tokens(output.len() as u64);
     format!("{output}\n\n[~{token_est} tokens]")
-}
-
-/// Whether an import of the target confirms the dependent. One without was
-/// found by a call to a name the target defines, which another definition
-/// may own.
-fn is_imported(dependent: &Dependent) -> bool {
-    !dependent.import_lines.is_empty()
 }
 
 /// The note that names what the call-site search left out, or nothing when
@@ -171,14 +211,15 @@ fn unsearched_note(result: &DepsResult) -> String {
     )
 }
 
-/// The lines that count the dependents left out of the listing, each as
-/// (total, listed): first those an import confirms, then those found by
-/// name only. Empty when all are listed.
-fn unlisted_dependents(imported: (usize, usize), by_name: (usize, usize)) -> String {
-    [(imported, "importing it"), (by_name, "by name only")]
+/// The lines that count the dependents of `all` left out of `listed`, one
+/// per kind of `Link` with any left out. Empty when all are listed.
+fn unlisted_dependents(all: &[Dependent], listed: &[&Dependent]) -> String {
+    Link::ALL
         .into_iter()
-        .filter_map(|((total, listed), how)| {
-            and_more(total, listed).map(|more| format!("... {more} {how}"))
+        .filter_map(|link| {
+            let total = all.iter().filter(|d| Link::of(d) == link).count();
+            let shown = listed.iter().filter(|d| Link::of(d) == link).count();
+            and_more(total, shown).map(|more| format!("... {more} {}", link.unlisted()))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -249,11 +290,7 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
             .map(|(caller, (line, syms))| (caller, line, syms))
             .collect();
         callers.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
-        let how = if is_imported(dep) {
-            "imports it"
-        } else {
-            "by name"
-        };
+        let how = Link::of(dep).mark();
         // The file's first row says how it was found, and its other rows follow it.
         for (i, (caller, line, syms)) in callers.iter().enumerate() {
             let loc = format!("{rel}:{line}");
@@ -379,6 +416,7 @@ mod tests {
                 is_test: i >= 15,
                 import_lines: vec![1],
                 via: None,
+                same_package: false,
             })
             .collect();
         DepsResult {
@@ -389,6 +427,7 @@ mod tests {
             skipped_large: Vec::new(),
             exported_count: 1,
             unsearched: Vec::new(),
+            importable: true,
         }
     }
 
@@ -402,6 +441,7 @@ mod tests {
             is_test: false,
             import_lines: vec![3],
             via: via.map(|v| PathBuf::from(format!("/r/{v}"))),
+            same_package: false,
         };
         let result = DepsResult {
             target: PathBuf::from("/r/lib.py"),
@@ -414,6 +454,7 @@ mod tests {
             skipped_large: Vec::new(),
             exported_count: 27,
             unsearched: vec!["get_dependant".to_string(), "x_y".to_string()],
+            importable: true,
         };
         let out = format_deps(&result, Path::new("/r"), None, false);
         assert!(
@@ -537,6 +578,96 @@ mod tests {
                 "{budget:?}: {out}"
             );
         }
+    }
+
+    /// #379: Go files of one package call each other with no import, so
+    /// each was a dependent by name only and capped with the coincidences,
+    /// though a change to the target breaks them.
+    #[test]
+    fn dependents_in_the_target_package_are_confirmed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = [
+            (
+                "pkg/target.go",
+                "package pkg\n\nfunc Helper() int { return 1 }\n",
+            ),
+            (
+                "pkg/same.go",
+                "package pkg\n\nfunc useIt() int { return Helper() }\n",
+            ),
+            (
+                "other/far.go",
+                "package other\n\nfunc far() int { return Helper() }\n",
+            ),
+        ];
+        for (rel, text) in files {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let out = crate::run_deps(
+            &tmp.path().join("pkg/target.go"),
+            tmp.path(),
+            None,
+            false,
+            tilth_core::search::walk::WalkConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            out.contains(
+                "## Used by\n\
+                 pkg/same.go:3                  useIt                \u{2192} Helper (same package)\n\
+                 other/far.go:3                 far                  \u{2192} Helper (by name)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("2 dependents, 1 of them by name only"),
+            "{out}"
+        );
+    }
+
+    /// Past the cap, the dependents in the target's package are counted
+    /// apart from those that import it.
+    #[test]
+    fn unlisted_dependents_are_counted_by_how_they_reach_the_target() {
+        let mut result = twenty_dependents();
+        for d in &mut result.used_by[..10] {
+            d.import_lines.clear();
+            d.same_package = true;
+        }
+        let out = format_deps(&result, Path::new("/r"), None, false);
+        let rows: Vec<&str> = out.lines().filter(|l| l.starts_with("user")).collect();
+        assert_eq!(rows.len(), 15, "{out}");
+        assert!(rows[0].ends_with("(same package)"), "{out}");
+        assert!(rows[14].ends_with("(imports it)"), "{out}");
+        assert!(out.contains("\n... and 5 more importing it"), "{out}");
+        assert!(!out.contains("in its package"), "{out}");
+        assert!(!out.contains("by name"), "{out}");
+
+        for d in &mut result.used_by[10..] {
+            d.import_lines.clear();
+            d.same_package = true;
+        }
+        let out = format_deps(&result, Path::new("/r"), None, false);
+        assert!(out.contains("\n... and 5 more in its package"), "{out}");
+        assert!(!out.contains("importing it"), "{out}");
+    }
+
+    /// Where no import can name the target (a Go or Java file, a C source
+    /// file), every dependent not in its package is found by name, and a
+    /// cap would hide real ones with nothing to tell them apart.
+    #[test]
+    fn dependents_by_name_are_all_listed_when_no_import_can_name_the_target() {
+        let mut result = mostly_by_name();
+        result.importable = false;
+        let out = format_deps(&result, Path::new("/r"), None, false);
+        assert_eq!(listed(&out), 10, "{out}");
+        assert!(!out.contains("more by name only"), "{out}");
+        assert!(
+            out.contains("10 dependents, 8 of them by name only"),
+            "{out}"
+        );
     }
 
     fn listed(out: &str) -> usize {
