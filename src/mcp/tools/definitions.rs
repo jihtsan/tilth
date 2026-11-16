@@ -353,6 +353,10 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     "root": {
                         "type": "string",
                         "description": "Optional absolute path. When provided, every RELATIVE file path in this call is anchored under `root` instead of the server's project root. Absolute file paths are used as-is. Writes must land inside `root`, or inside the folder the server was launched in when `root` is omitted; set `root` to a directory that contains every path in the call. Use this when the server was launched from a different directory than the worktree you are editing."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Optional directory that every write in this call must land inside; it replaces `root` as that boundary but does not anchor relative file paths, and a relative scope resolves against the server's project root, not against `root`."
                     }
                 }
             }
@@ -375,6 +379,159 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// Each tool `dispatch_tool` runs, with the source of its handler.
+    const HANDLERS: [(&str, &str); 8] = [
+        ("tilth_search", include_str!("search.rs")),
+        ("tilth_read", include_str!("read.rs")),
+        ("tilth_list", include_str!("list.rs")),
+        ("tilth_deps", include_str!("deps.rs")),
+        ("tilth_grok", include_str!("grok.rs")),
+        ("tilth_diff", include_str!("diff.rs")),
+        ("tilth_session", include_str!("session.rs")),
+        ("tilth_write", include_str!("write.rs")),
+    ];
+
+    /// `(tool, argument)` pairs the handler reads and the schema leaves out.
+    /// Each row must still be a gap, so the fix for one deletes its row.
+    const KNOWN_UNLISTED: &[(&str, &str)] = &[
+        // #407: `dispatch_tool` honours a per-call `gitignore` on every tool,
+        // and only tilth_search and tilth_list advertise it.
+        ("tilth_deps", "gitignore"),
+        ("tilth_diff", "gitignore"),
+        ("tilth_grok", "gitignore"),
+        ("tilth_read", "gitignore"),
+        ("tilth_write", "gitignore"),
+    ];
+
+    /// Tools `dispatch_tool` runs that no schema advertises (#408).
+    const KNOWN_UNADVERTISED: &[&str] = &["tilth_session"];
+
+    /// The body of `dispatch_tool`, which reads arguments for every tool
+    /// before it picks a handler.
+    fn dispatcher_source() -> &'static str {
+        let source = include_str!("../mod.rs");
+        let start = source
+            .find("fn dispatch_tool(")
+            .expect("dispatch_tool in src/mcp/mod.rs");
+        let len = source[start..]
+            .find("\n}\n")
+            .expect("dispatch_tool ends at a closing brace in column 0");
+        &source[start..start + len]
+    }
+
+    /// The top-level argument names `code` reads. A read is
+    /// `args.get("name")`, and `resolve_scope(args, ..)` reads `scope`.
+    /// Handing `args` to a `tool_*` handler reads nothing by itself. Any other
+    /// use of `args` fails the test, so a new way of reading an argument has
+    /// to be taught here before it can hide a name from the check.
+    fn argument_reads(code: &str, origin: &str) -> BTreeSet<String> {
+        let code = code.split("#[cfg(test)]").next().unwrap_or(code);
+        let code: String = code
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut reads = BTreeSet::new();
+        for (at, word) in code.match_indices("args") {
+            let (before, after) = (&code[..at], &code[at + word.len()..]);
+            if before.ends_with(is_ident) || after.starts_with(is_ident) {
+                continue;
+            }
+            let (before, after) = (before.trim_end(), after.trim_start());
+            if after.starts_with(':') {
+                continue;
+            }
+            if let Some(rest) = after.strip_prefix(".get(\"") {
+                let name = rest.split('"').next().unwrap_or_default();
+                reads.insert(name.to_string());
+                continue;
+            }
+            if after.starts_with([',', ')']) {
+                if before.ends_with("resolve_scope(") {
+                    reads.insert("scope".to_string());
+                    continue;
+                }
+                let callee = before.strip_suffix('(').unwrap_or_default();
+                let callee = &callee[callee.trim_end_matches(is_ident).len()..];
+                if callee.starts_with("tool_") {
+                    continue;
+                }
+            }
+            let line = before.lines().last().unwrap_or_default();
+            let rest = after.lines().next().unwrap_or_default();
+            panic!("{origin}: unrecognised use of `args`: `{line} args {rest}`");
+        }
+        reads
+    }
+
+    /// #388: every argument a handler reads is a property in its tool's
+    /// input schema, and every property is read, so an agent is neither
+    /// refused for want of a parameter it was never shown nor offered one
+    /// that does nothing.
+    #[test]
+    fn schemas_list_exactly_the_arguments_handlers_read() {
+        let dispatcher = dispatcher_source();
+        let dispatched: BTreeSet<&str> = dispatcher
+            .split("\"tilth_")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        let handled: BTreeSet<&str> = HANDLERS
+            .iter()
+            .map(|(tool, _)| tool.trim_start_matches("tilth_"))
+            .collect();
+        assert_eq!(
+            dispatched, handled,
+            "HANDLERS must list what dispatch_tool runs"
+        );
+
+        let schemas: BTreeMap<String, BTreeSet<String>> = tool_definitions(true)
+            .iter()
+            .map(|tool| {
+                let name = tool["name"].as_str().unwrap_or_default().to_string();
+                let properties = tool["inputSchema"]["properties"]
+                    .as_object()
+                    .map(|props| props.keys().cloned().collect())
+                    .unwrap_or_default();
+                (name, properties)
+            })
+            .collect();
+        let shared = argument_reads(dispatcher, "dispatch_tool");
+
+        let mut unadvertised = Vec::new();
+        let mut unlisted = Vec::new();
+        for (tool, source) in HANDLERS {
+            let mut reads = argument_reads(source, tool);
+            reads.extend(shared.iter().cloned());
+            let Some(properties) = schemas.get(tool) else {
+                unadvertised.push(tool);
+                continue;
+            };
+            unlisted.extend(reads.difference(properties).map(|arg| (tool, arg.clone())));
+            let unread: Vec<_> = properties.difference(&reads).collect();
+            assert!(
+                unread.is_empty(),
+                "{tool} advertises {unread:?}, which its handler never reads"
+            );
+        }
+        let known: Vec<(&str, String)> = KNOWN_UNLISTED
+            .iter()
+            .map(|&(tool, arg)| (tool, arg.to_string()))
+            .collect();
+        unlisted.sort();
+        assert_eq!(
+            unlisted, known,
+            "arguments read but missing from the schema"
+        );
+        assert_eq!(
+            unadvertised, KNOWN_UNADVERTISED,
+            "tools dispatched but not advertised"
+        );
+    }
 
     #[test]
     fn tilth_write_schema_requires_mode_specific_fields() {
