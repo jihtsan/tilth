@@ -17,7 +17,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, select, RecvError};
 
@@ -236,6 +236,45 @@ where
     }
 }
 
+/// A call's time limit, counted from when the call started. Work run
+/// within it gets what is left and is abandoned, like any timed-out worker,
+/// when that runs out. A call that must finish whatever happens, such as a
+/// write, runs outside it and bounds only the work it can do without.
+pub(crate) struct TimeLimit {
+    tracker: Arc<ThreadTracker>,
+    started: Instant,
+    limit: Duration,
+}
+
+impl TimeLimit {
+    pub(crate) fn starting_now(tracker: Arc<ThreadTracker>, limit: Duration) -> Self {
+        Self {
+            tracker,
+            started: Instant::now(),
+            limit,
+        }
+    }
+
+    /// The whole limit, for messages that name it.
+    pub(crate) fn limit(&self) -> Duration {
+        self.limit
+    }
+
+    /// Run `work` within what is left of the limit. Work with nothing left
+    /// is never started, so a zero limit refuses it every time.
+    pub(crate) fn run<F, R>(&self, work: F) -> Result<R, SpawnFailure>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let left = self.limit.saturating_sub(self.started.elapsed());
+        if left.is_zero() {
+            return Err(SpawnFailure::Timeout);
+        }
+        spawn_with_timeout(&self.tracker, left, work)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +320,21 @@ mod tests {
             });
         assert_eq!(result, Err(SpawnFailure::Panic));
         assert_eq!(tracker.current(), 0, "panic must not leak a tracker slot");
+    }
+
+    #[test]
+    fn a_zero_time_limit_never_starts_its_work() {
+        let tracker = Arc::new(ThreadTracker::new());
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&started);
+        let result = TimeLimit::starting_now(Arc::clone(&tracker), Duration::ZERO)
+            .run(move || flag.store(true, Ordering::SeqCst));
+        assert_eq!(result, Err(SpawnFailure::Timeout));
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "work ran with no time left"
+        );
+        assert_eq!(tracker.current(), 0, "nothing was abandoned");
     }
 
     #[test]

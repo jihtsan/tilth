@@ -277,7 +277,10 @@ goes back immediately with an `isError: true` payload; the worker thread
 is **abandoned** (not joined, not killed) — this is the safest option in
 Rust since cancelling a thread mid-tree-sitter-parse is unsound. A
 process-wide `ABANDONED_THREADS` counter logs to stderr once
-accumulation hits 3.
+accumulation hits 3. `tilth_write` is the exception: a write that has
+landed must be reported, so it runs to the end and only its blast-radius
+walk is bounded by the time limit (see the per-request thread model
+below).
 
 Edit mode (`--edit`) appends an `EDIT_MODE_EXTRA` instruction block
 describing `tilth_write` and unlocks the `tilth_write` dispatch arm.
@@ -1036,11 +1039,15 @@ compact `-`/`+` rendering of every edit site, `context` is the
 hashlined window around each rewrite. The formatter (`format_diffs`,
 also in `edit.rs`) produces the diff string itself.
 
-The callee-callers warning lives one layer up. `mcp::tool_edit`, on a
-successful `Applied` result, calls `search::blast::blast_radius` with
-the same `Edit` list and appends its output. It searches the file's
-package, or, for a file outside any package, the call's write boundary
-(its `scope`, else its `root`, else the server's root). The check is
+The callee-callers warning lives one layer up. `apply_batch` applies
+every file's edits first, takes a `search::blast::blast_query` for each
+successful `Applied` result with the same `Edit` list, then walks them
+all with `blast_within` and appends each output to its file's section.
+It searches the file's package, or, for a file outside any package, the
+call's write boundary (its `scope`, else its `root`, else the server's
+root). Only that walk is bounded by the call's time limit; a walk that
+runs out of time is left behind, and the section says the callers were
+not checked. The check is
 unconditional in MCP (every successful edit gets the warning); the
 `diff: true` argument controls whether the per-edit `-`/`+` block is
 shown alongside the hashlined context, *not* whether the blast
@@ -1072,6 +1079,14 @@ a stderr warning at 3 abandoned threads. The reason this design is
 necessary: aborting a thread mid-tree-sitter-parse is unsafe, so
 "forget about it" is the only correct option short of a full async
 rewrite.
+
+A write cannot be forgotten that way: the abandoned worker would still
+land it after the caller was told it timed out, and a retry would write
+twice. So `tilth_write` runs on the main loop to the end, and its time
+limit (`timeout::TimeLimit`) bounds only the blast-radius walk, which
+runs on an abandonable worker with whatever time is left. What bounds
+the write itself is its input: at most 20 files, each read, verified,
+rewritten and parsed, with no walk of the tree.
 
 **Tool definitions.** `tool_definitions(edit_mode)` returns the schemas
 emitted at `tools/list`. These are the canonical source for argument
