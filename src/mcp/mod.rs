@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::diag;
 use crate::session::Session;
-use crate::timeout::{spawn_with_timeout, SpawnFailure, ThreadTracker};
+use crate::timeout::{spawn_with_timeout, SpawnFailure, ThreadTracker, TimeLimit};
 use tilth_core::cache::OutlineCache;
 use tilth_core::index::bloom::BloomFilterCache;
 
@@ -415,9 +415,14 @@ fn dispatch_tool(tool: &str, args: &Value, services: &Services) -> Result<String
         "tilth_grok" => tool_grok(args, services.bloom(), services.session(), &config, root),
         "tilth_diff" => tool_diff(args, walk, root),
         "tilth_session" => tool_session(args, services.session()),
-        "tilth_write" if edit_mode => {
-            tool_write(args, services.session(), services.bloom(), walk, root)
-        }
+        "tilth_write" if edit_mode => tool_write(
+            args,
+            services.session(),
+            services.bloom(),
+            walk,
+            root,
+            &TimeLimit::starting_now(Arc::clone(services.tracker()), config.request_timeout),
+        ),
         _ => Err(format!("unknown tool: {tool}")),
     }
 }
@@ -438,7 +443,7 @@ fn handle_tool_call(req: &JsonRpcRequest, services: &Services) -> JsonRpcRespons
                 .into(),
         )
     } else {
-        run_tool_with_timeout(services, tool_name, args, services.config().request_timeout)
+        run_tool(services, tool_name, args)
     };
     // A notice changes what the call answered for, so it comes first.
     let result = match services.notice.as_deref() {
@@ -451,12 +456,22 @@ fn handle_tool_call(req: &JsonRpcRequest, services: &Services) -> JsonRpcRespons
     build_tool_response(req.id.clone(), result)
 }
 
-fn run_tool_with_timeout(
-    services: &Services,
-    tool_name: &str,
-    args: &Value,
-    timeout: std::time::Duration,
-) -> Result<String, String> {
+/// Why a call that panicked has no result.
+const PANICKED: &str = "tool panicked during execution";
+
+/// Run one tool call within the server's time limit, abandoning it when the
+/// limit runs out. A write is never abandoned: once it may have landed, an
+/// error saying it timed out would send the caller to write it again. So it
+/// runs here to the end and bounds only its blast-radius walk, which it
+/// leaves out with a note when the limit runs out.
+fn run_tool(services: &Services, tool_name: &str, args: &Value) -> Result<String, String> {
+    if tool_name == "tilth_write" {
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_tool(tool_name, args, services)
+        }))
+        .unwrap_or_else(|_| Err(PANICKED.into()));
+    }
+    let timeout = services.config().request_timeout;
     let services_worker = services.clone();
     let tool_name_owned = tool_name.to_string();
     let args_owned = args.clone();
@@ -478,7 +493,7 @@ fn run_tool_with_timeout(
              TILTH_TIMEOUT=<seconds> to increase the limit.",
             timeout.as_secs()
         )),
-        Err(SpawnFailure::Panic) => Err("tool panicked during execution".into()),
+        Err(SpawnFailure::Panic) => Err(PANICKED.into()),
     }
 }
 
@@ -760,5 +775,123 @@ mod tests {
                 "expected unknown-tool error (edit_mode={edit_mode}): {err}"
             );
         }
+    }
+
+    // -- tilth_write past the time limit (#386) -------------------------------
+
+    /// One `tools/call` through the server's own handler: the result's text
+    /// and whether it is an error.
+    fn call_tool(services: &Services, name: &str, arguments: &Value) -> (String, bool) {
+        let req = JsonRpcRequest {
+            _jsonrpc: "2.0".into(),
+            id: Some(1.into()),
+            method: "tools/call".into(),
+            params: serde_json::json!({ "name": name, "arguments": arguments }),
+        };
+        let result = handle_tool_call(&req, services).result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap().to_string();
+        (text, result.get("isError") == Some(&Value::Bool(true)))
+    }
+
+    /// An edit-mode server rooted at `root` whose calls have no time at all.
+    fn out_of_time(root: &Path) -> Services {
+        let config = Config {
+            request_timeout: std::time::Duration::ZERO,
+            ..Config::default()
+        };
+        Services::new(config, true, Some(root.canonicalize().unwrap()))
+    }
+
+    /// A write that outlives the time limit must not be reported as timed
+    /// out, because it still lands and an agent that retries writes twice.
+    /// With no time at all, an append lands, says what it did, and the next
+    /// call sees exactly that: the anchor it echoed for the appended line
+    /// takes a hash edit.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "by design: the test reads the file it checks directly"
+    )]
+    fn a_write_past_the_time_limit_lands_once_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let services = out_of_time(dir.path());
+
+        let append = serde_json::json!({
+            "files": [{ "path": "t.txt", "mode": "append", "content": "two\n" }],
+        });
+        let (text, is_error) = call_tool(&services, "tilth_write", &append);
+        assert!(
+            !is_error,
+            "a write that landed was reported as failed:\n{text}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\n");
+
+        let anchor = text
+            .lines()
+            .find_map(|l| l.strip_suffix("|two"))
+            .unwrap_or_else(|| panic!("no anchor for the appended line in:\n{text}"));
+        let edit = serde_json::json!({
+            "files": [{ "path": "t.txt", "edits": [{ "start": anchor, "content": "three" }] }],
+        });
+        let (text, is_error) = call_tool(&services, "tilth_write", &edit);
+        assert!(!is_error, "{text}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\nthree\n");
+    }
+
+    /// The blast-radius walk is the one part of a write the time limit
+    /// bounds. Out of time, the edit lands and its section says the callers
+    /// were not checked; with time, the same edit lists the caller.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "by design: the test reads the file it checks directly"
+    )]
+    fn a_hash_edit_past_the_time_limit_lands_without_its_blast_radius() {
+        let edit_target = |services: &dyn Fn(&Path) -> Services| {
+            let dir = tempfile::tempdir().unwrap();
+            let lib = dir.path().join("lib.rs");
+            std::fs::write(&lib, "pub fn target(x: u32) -> u32 {\n    x\n}\n").unwrap();
+            std::fs::write(
+                dir.path().join("user.rs"),
+                "fn user() {\n    target(1);\n}\n",
+            )
+            .unwrap();
+            let hash = crate::format::line_hash(b"pub fn target(x: u32) -> u32 {");
+            let edit = serde_json::json!({
+                "files": [{
+                    "path": "lib.rs",
+                    "edits": [{
+                        "start": format!("1:{hash:03x}"),
+                        "content": "pub fn target(x: u64) -> u64 {",
+                    }],
+                }],
+            });
+            let (text, is_error) = call_tool(&services(dir.path()), "tilth_write", &edit);
+            assert!(!is_error, "{text}");
+            assert!(
+                std::fs::read_to_string(&lib)
+                    .unwrap()
+                    .starts_with("pub fn target(x: u64)"),
+                "the edit did not land:\n{text}"
+            );
+            text
+        };
+
+        let text = edit_target(&out_of_time);
+        assert!(
+            text.contains(
+                "── blast radius ──\ncallers of `target` not checked: \
+                 the search ran past the 0s time limit (TILTH_TIMEOUT)\n"
+            ),
+            "{text}"
+        );
+
+        let text = edit_target(&|root| {
+            Services::new(Config::default(), true, Some(root.canonicalize().unwrap()))
+        });
+        assert!(text.contains("user.rs:2"), "{text}");
+        assert!(!text.contains("not checked"), "{text}");
     }
 }
