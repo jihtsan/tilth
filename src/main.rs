@@ -4,6 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
@@ -223,7 +224,11 @@ fn main() {
                     diag::emit(format_args!("overview error: {e}"));
                     process::exit(1);
                 });
-                let output = tilth::overview::fingerprint(&cwd, config.walk);
+                let output = tilth::overview::fingerprint(
+                    &cwd,
+                    config.walk,
+                    Instant::now() + tilth::overview::LIMIT,
+                );
                 if output.is_empty() {
                     diag::emit(format_args!("No project fingerprint could be generated."));
                     process::exit(1);

@@ -23,38 +23,55 @@ const DEPS_SHOWN: usize = 10;
 const HOT_SHOWN: usize = 5;
 /// How many walk entries the file count looks at before it stops and
 /// shows its count as a lower bound ("N+ source files"), so a huge tree
-/// stays within the overview's time budget.
+/// stays within the overview's time limit.
 const COUNT_CAP: usize = 10_000;
 /// The walk depth of the deepest file the `dirs`, `hot` and `tests` lines
 /// look at: one two directories below the root.
 const SAMPLE_DEPTH: usize = 3;
 
+/// How long the overview may take, all its parts together. It runs
+/// synchronously in the MCP `initialize` handler, so the session waits on it.
+pub const LIMIT: Duration = Duration::from_millis(250);
+
 /// Compute a project fingerprint for MCP initialization, walking `root`
 /// by the `walk` settings every search uses.
-/// Must be fast (<250ms) — runs synchronously in the initialize handler.
+///
+/// Every part stops at `deadline`, and a part that has not finished by then
+/// is left out: a file count cut short reads as a lower bound (`N+`), and a
+/// deadline already past gives an empty string. A part checks the deadline
+/// between its steps, so one step that blocks (a slow read or stat) can
+/// still run past it.
+///
 /// Returns empty string on any failure (no error propagation).
 #[must_use]
-pub fn fingerprint(root: &Path, walk: WalkConfig) -> String {
-    let start = Instant::now();
+pub fn fingerprint(root: &Path, walk: WalkConfig, deadline: Instant) -> String {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fingerprint_inner(root, walk, COUNT_CAP)
+        fingerprint_inner(root, walk, COUNT_CAP, deadline)
     }));
-    let elapsed = start.elapsed();
-    if elapsed.as_millis() > 250 {
+    if let Some(over) = Instant::now().checked_duration_since(deadline) {
         crate::diag::emit(format_args!(
-            "[tilth] fingerprint took {}ms (>250ms budget)",
-            elapsed.as_millis()
+            "[tilth] the overview stopped at its deadline ({}ms over) and left out what it had not finished",
+            over.as_millis()
         ));
     }
     result.unwrap_or_default()
 }
 
-#[expect(clippy::too_many_lines, reason = "split by responsibility in #315")]
-fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
+/// Whether `deadline` has passed, so no new step may start.
+fn past(deadline: Instant) -> bool {
+    Instant::now() >= deadline
+}
+
+fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize, deadline: Instant) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    let count = count_sources(root, walk, cap);
-    let sample = sample_files(root, walk);
+    // Out of time before the walk began, so there is nothing to describe.
+    let Some(count) = count_sources(root, walk, cap, deadline) else {
+        return String::new();
+    };
+    // The `dirs`, `hot` and `tests` lines and the header's directory count
+    // describe this sample, so each is left out when it is cut short.
+    let sample = sample_files(root, walk, deadline);
 
     // Primary language: the most files, and on a tie the name first in
     // alphabetical order, since the map iterates in a random order.
@@ -75,106 +92,25 @@ fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
         .unwrap_or_else(|| count.by_lang.values().sum::<usize>());
     let at_least = if count.capped { "+" } else { "" };
 
-    // Modules: dirs with >=2 files of the primary language, with common prefix stripped.
-    // Keys in module_lang_counts may be "dir" or "dir/subdir" (for deeply nested projects).
-    let modules: Vec<String> = {
-        // Collect dirs with >=2 primary-language files
-        let mut mods: Vec<(String, usize)> = sample
-            .module_lang_counts
-            .iter()
-            .filter_map(|(name, lang_map)| {
-                let count = primary_lang
-                    .and_then(|l| lang_map.get(&l))
-                    .copied()
-                    .unwrap_or(0);
-                if count >= 2 {
-                    Some((name.clone(), count))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // If all modules (or at least most) share a common top-level prefix
-        // (e.g., all are "src/..."), strip it so we display short names
-        // ("diff/" not "src/diff/"). Also exclude the bare prefix entry itself.
-        if mods.len() >= 2 {
-            let prefix = common_dir_prefix(&mods);
-            if !prefix.is_empty() {
-                // The prefix without trailing slash (e.g., "src")
-                let prefix_bare = prefix.trim_end_matches('/');
-                mods = mods
-                    .into_iter()
-                    .filter_map(|(name, count)| {
-                        if name == prefix_bare {
-                            // Drop the bare prefix itself (it's the container, not a module)
-                            None
-                        } else if let Some(stripped) = name.strip_prefix(&prefix) {
-                            let s = stripped.trim_start_matches('/');
-                            if s.is_empty() {
-                                None
-                            } else {
-                                Some((s.to_string(), count))
-                            }
-                        } else {
-                            Some((name, count))
-                        }
-                    })
-                    .collect();
-            }
-        }
-        // Filter out well-known non-source directories
-        let non_source = [
-            "test",
-            "tests",
-            "__tests__",
-            "spec",
-            "specs",
-            "doc",
-            "docs",
-            "docs_src",
-            "documentation",
-            "example",
-            "examples",
-            "sample",
-            "samples",
-            "script",
-            "scripts",
-            "tools",
-            "fixtures",
-            "benchmark",
-            "benchmarks",
-            "bench",
-            ".github",
-            ".vscode",
-            ".idea",
-            "vendor",
-            "node_modules",
-            "target",
-            "dist",
-            "build",
-        ];
-        mods.retain(|(name, _)| {
-            let lower = name.to_lowercase();
-            // Check if ANY path component is a non-source dir
-            !lower.split('/').any(|part| non_source.contains(&part))
-        });
-        // Most files first, ties by name. The names come out of a hash map
-        // in a random order, so the name decides every tie.
-        mods.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        mods.into_iter().map(|(name, _)| name).collect()
-    };
+    let modules = sample.as_ref().map(|sample| modules(sample, primary_lang));
 
     // Header line
-    let dir_count = modules.len();
-    lines.push(format!(
-        "[tilth] {lang_name} project — {total_files}{at_least} source {}, {dir_count} {}",
-        noun(total_files, "file", "files"),
-        noun(dir_count, "directory", "directories")
-    ));
+    let mut header = format!(
+        "[tilth] {lang_name} project — {total_files}{at_least} source {}",
+        noun(total_files, "file", "files")
+    );
+    if let Some(modules) = &modules {
+        let dir_count = modules.len();
+        let _ = write!(
+            header,
+            ", {dir_count} {}",
+            noun(dir_count, "directory", "directories")
+        );
+    }
+    lines.push(header);
 
     // Directories, most files first
-    if !modules.is_empty() {
+    if let Some(modules) = modules.filter(|modules| !modules.is_empty()) {
         let mut dirs: Vec<String> = modules
             .iter()
             .take(DIRS_SHOWN)
@@ -185,7 +121,12 @@ fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
     }
 
     // Manifest — name, version, deps
-    if let Some(manifest) = find_manifest(root) {
+    let manifest = if past(deadline) {
+        None
+    } else {
+        find_manifest(root)
+    };
+    if let Some(manifest) = manifest {
         if let Some(info) = parse_manifest(root, &manifest) {
             // Deps line
             if !info.deps.is_empty() {
@@ -194,17 +135,17 @@ fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
             }
 
             // Hot files (only for projects with local imports)
-            if let Some(hot) = hot_files(root, &sample, primary_lang) {
+            if let Some(hot) = hot_files(root, sample.as_ref(), primary_lang, deadline) {
                 lines.push(format!("  hot (× = importers): {hot}"));
             }
 
             // Git context
-            if let Some(git) = git_context(root, Instant::now() + GIT_LIMIT) {
+            if let Some(git) = git_context(root, deadline) {
                 lines.push(format!("  git: {git}"));
             }
 
             // Test style
-            if let Some(tests) = test_style(root, &sample, primary_lang) {
+            if let Some(tests) = test_style(root, sample.as_ref(), primary_lang, deadline) {
                 lines.push(format!("  tests: {tests}"));
             }
 
@@ -221,18 +162,114 @@ fn fingerprint_inner(root: &Path, walk: WalkConfig, cap: usize) -> String {
         }
     } else {
         // No manifest — still show hot, git, tests
-        if let Some(hot) = hot_files(root, &sample, primary_lang) {
+        if let Some(hot) = hot_files(root, sample.as_ref(), primary_lang, deadline) {
             lines.push(format!("  hot (× = importers): {hot}"));
         }
-        if let Some(git) = git_context(root, Instant::now() + GIT_LIMIT) {
+        if let Some(git) = git_context(root, deadline) {
             lines.push(format!("  git: {git}"));
         }
-        if let Some(tests) = test_style(root, &sample, primary_lang) {
+        if let Some(tests) = test_style(root, sample.as_ref(), primary_lang, deadline) {
             lines.push(format!("  tests: {tests}"));
         }
     }
 
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Modules
+// ---------------------------------------------------------------------------
+
+/// The directories the `dirs` line lists, most files first: those with two
+/// or more files of the primary language, with their common prefix
+/// stripped. Keys in `module_lang_counts` may be "dir" or "dir/subdir" (for
+/// deeply nested projects).
+fn modules(sample: &Sample, primary_lang: Option<Lang>) -> Vec<String> {
+    // Collect dirs with >=2 primary-language files
+    let mut mods: Vec<(String, usize)> = sample
+        .module_lang_counts
+        .iter()
+        .filter_map(|(name, lang_map)| {
+            let count = primary_lang
+                .and_then(|l| lang_map.get(&l))
+                .copied()
+                .unwrap_or(0);
+            if count >= 2 {
+                Some((name.clone(), count))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // If all modules (or at least most) share a common top-level prefix
+    // (e.g., all are "src/..."), strip it so we display short names
+    // ("diff/" not "src/diff/"). Also exclude the bare prefix entry itself.
+    if mods.len() >= 2 {
+        let prefix = common_dir_prefix(&mods);
+        if !prefix.is_empty() {
+            // The prefix without trailing slash (e.g., "src")
+            let prefix_bare = prefix.trim_end_matches('/');
+            mods = mods
+                .into_iter()
+                .filter_map(|(name, count)| {
+                    if name == prefix_bare {
+                        // Drop the bare prefix itself (it's the container, not a module)
+                        None
+                    } else if let Some(stripped) = name.strip_prefix(&prefix) {
+                        let s = stripped.trim_start_matches('/');
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some((s.to_string(), count))
+                        }
+                    } else {
+                        Some((name, count))
+                    }
+                })
+                .collect();
+        }
+    }
+    // Filter out well-known non-source directories
+    let non_source = [
+        "test",
+        "tests",
+        "__tests__",
+        "spec",
+        "specs",
+        "doc",
+        "docs",
+        "docs_src",
+        "documentation",
+        "example",
+        "examples",
+        "sample",
+        "samples",
+        "script",
+        "scripts",
+        "tools",
+        "fixtures",
+        "benchmark",
+        "benchmarks",
+        "bench",
+        ".github",
+        ".vscode",
+        ".idea",
+        "vendor",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+    ];
+    mods.retain(|(name, _)| {
+        let lower = name.to_lowercase();
+        // Check if ANY path component is a non-source dir
+        !lower.split('/').any(|part| non_source.contains(&part))
+    });
+    // Most files first, ties by name. The names come out of a hash map
+    // in a random order, so the name decides every tie.
+    mods.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    mods.into_iter().map(|(name, _)| name).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -272,32 +309,47 @@ fn lang_display_name(lang: Lang) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Source files per language, from a walk of the whole tree that may stop
-/// at its cap.
+/// at its cap or its deadline.
 struct SourceCount {
     by_lang: HashMap<Lang, usize>,
-    /// Whether the walk stopped at its cap with entries left, so the tree
-    /// may hold more files than were counted.
+    /// Whether the walk stopped with entries left, so the tree may hold
+    /// more files than were counted.
     capped: bool,
 }
 
 /// Count the source files under `root` by the walk policy every search
-/// uses. The walk looks at no more than `cap` entries, so a huge tree stays
-/// within the overview's time budget and its count reads as a lower bound.
-fn count_sources(root: &Path, walk: WalkConfig, cap: usize) -> SourceCount {
+/// uses. The walk looks at no more than `cap` entries and stops at
+/// `deadline`, so a huge tree stays within the overview's time limit and
+/// its count reads as a lower bound. `None` when the deadline had passed
+/// before the walk began.
+fn count_sources(
+    root: &Path,
+    walk: WalkConfig,
+    cap: usize,
+    deadline: Instant,
+) -> Option<SourceCount> {
+    if past(deadline) {
+        return None;
+    }
     let mut by_lang: HashMap<Lang, usize> = HashMap::new();
     let mut entries = base_walk_builder(root, walk).build().flatten();
-    for entry in entries.by_ref().take(cap) {
+    let mut seen = 0;
+    let capped = loop {
+        let Some(entry) = entries.next() else {
+            break false;
+        };
+        if seen == cap || past(deadline) {
+            break true;
+        }
+        seen += 1;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         if let FileType::Code(lang) = detect_file_type(entry.path()) {
             *by_lang.entry(lang).or_insert(0) += 1;
         }
-    }
-    SourceCount {
-        by_lang,
-        capped: entries.next().is_some(),
-    }
+    };
+    Some(SourceCount { by_lang, capped })
 }
 
 #[expect(
@@ -319,13 +371,17 @@ struct Sample {
 
 /// The top of the tree the `dirs`, `hot` and `tests` lines describe: files
 /// up to two directories below the root, and directories down to that depth.
-fn sample_files(root: &Path, walk: WalkConfig) -> Sample {
+/// `None` when `deadline` passes before the walk is done.
+fn sample_files(root: &Path, walk: WalkConfig, deadline: Instant) -> Option<Sample> {
     let mut sample = Sample::default();
     let entries = base_walk_builder(root, walk)
         .max_depth(Some(SAMPLE_DEPTH))
         .build()
         .flatten();
     for entry in entries {
+        if past(deadline) {
+            return None;
+        }
         let Some(ft) = entry.file_type() else {
             continue;
         };
@@ -375,7 +431,7 @@ fn sample_files(root: &Path, walk: WalkConfig) -> Sample {
             }
         }
     }
-    sample
+    Some(sample)
 }
 
 // ---------------------------------------------------------------------------
@@ -544,9 +600,6 @@ fn parse_pyproject_toml(root: &Path) -> Option<ManifestInfo> {
 // Git context
 // ---------------------------------------------------------------------------
 
-/// How long the `git:` line may take, all its git commands together.
-const GIT_LIMIT: Duration = Duration::from_millis(200);
-
 /// The `git:` line: the branch, or the short commit id on a detached HEAD,
 /// and how many files have uncommitted changes.
 ///
@@ -598,7 +651,15 @@ fn git_context(root: &Path, deadline: Instant) -> Option<String> {
 // Test style detection
 // ---------------------------------------------------------------------------
 
-fn test_style(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Option<String> {
+/// The test conventions the sample shows. `None` when there are none, or
+/// when `deadline` passes first.
+fn test_style(
+    root: &Path,
+    sample: Option<&Sample>,
+    primary_lang: Option<Lang>,
+    deadline: Instant,
+) -> Option<String> {
+    let sample = sample.filter(|_| !past(deadline))?;
     let mut styles: Vec<String> = Vec::new();
 
     // Directory-based test detection
@@ -641,7 +702,7 @@ fn test_style(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Optio
 
     // Rust in-source test detection
     if primary_lang == Some(Lang::Rust) {
-        let has_cfg_test = sample
+        let rust_files = sample
             .code_files
             .iter()
             .filter(|(path, _)| {
@@ -649,12 +710,20 @@ fn test_style(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Optio
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
             })
-            .take(5)
-            .any(|(path, _)| {
-                let full = root.join(path);
-                tilth_core::source::read_source(&full)
-                    .is_ok_and(|content| content.is_some_and(|c| c.contains("#[cfg(test)]")))
-            });
+            .take(5);
+        let mut has_cfg_test = false;
+        for (path, _) in rust_files {
+            if past(deadline) {
+                return None;
+            }
+            let full = root.join(path);
+            if tilth_core::source::read_source(&full)
+                .is_ok_and(|content| content.is_some_and(|c| c.contains("#[cfg(test)]")))
+            {
+                has_cfg_test = true;
+                break;
+            }
+        }
         if has_cfg_test {
             styles.push("in-source #[cfg(test)]".to_string());
         }
@@ -672,10 +741,17 @@ fn test_style(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Optio
 // ---------------------------------------------------------------------------
 
 /// The most imported local files, from the imports of the 100 smallest code
-/// files. The limit is a file count, never a clock, so a loaded machine
-/// reads the same files as an idle one (#281).
-fn hot_files(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Option<String> {
+/// files. The file limit is a count, so a loaded machine reads the same
+/// files as an idle one (#281); a `deadline` that passes before they are
+/// all read leaves the line out rather than show a partial count.
+fn hot_files(
+    root: &Path,
+    sample: Option<&Sample>,
+    primary_lang: Option<Lang>,
+    deadline: Instant,
+) -> Option<String> {
     primary_lang?; // require a detected language
+    let sample = sample?;
 
     // Sort by size (smallest first) and take first 100
     let mut files: Vec<&(String, u64)> = sample.code_files.iter().collect();
@@ -689,6 +765,9 @@ fn hot_files(root: &Path, sample: &Sample, primary_lang: Option<Lang>) -> Option
     let mut all_import_sources: Vec<String> = Vec::new();
 
     for (rel_path, _) in &files {
+        if past(deadline) {
+            return None;
+        }
         let full = root.join(rel_path);
         let Ok(Some(content)) = tilth_core::source::read_source(&full) else {
             continue;
@@ -789,7 +868,7 @@ mod tests {
     #[test]
     fn test_fingerprint_on_tilth() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let output = fingerprint(root, WalkConfig::default());
+        let output = fingerprint(root, WalkConfig::default(), far_off());
 
         assert!(!output.is_empty(), "fingerprint should not be empty");
         assert!(
@@ -824,8 +903,8 @@ mod tests {
             )
             .unwrap();
         }
-        let sample = sample_files(tmp.path(), WalkConfig::default());
-        let hot = hot_files(tmp.path(), &sample, Some(Lang::Rust));
+        let sample = sample_files(tmp.path(), WalkConfig::default(), far_off());
+        let hot = hot_files(tmp.path(), sample.as_ref(), Some(Lang::Rust), far_off());
         assert_eq!(
             hot.as_deref(),
             Some("src/other.rs ×2, src/types.rs(Outline) ×2")
@@ -853,7 +932,10 @@ mod tests {
         let expected = "[tilth] Python project — 16 source files, 8 directories\n  \
              dirs: alpha/ bravo/ charlie/ delta/ echo/ foxtrot/ golf/ hotel/";
         for _ in 0..10 {
-            assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
+            assert_eq!(
+                fingerprint(tmp.path(), WalkConfig::default(), far_off()),
+                expected
+            );
         }
     }
 
@@ -877,12 +959,18 @@ mod tests {
         let tmp = tree_of_dirs(DIRS_SHOWN + 1);
         let expected = "[tilth] Python project — 22 source files, 11 directories\n  \
              dirs: d00/ d01/ d02/ d03/ d04/ d05/ d06/ d07/ d08/ d09/ and 1 more";
-        assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
+        assert_eq!(
+            fingerprint(tmp.path(), WalkConfig::default(), far_off()),
+            expected
+        );
 
         let tmp = tree_of_dirs(DIRS_SHOWN);
         let expected = "[tilth] Python project — 20 source files, 10 directories\n  \
              dirs: d00/ d01/ d02/ d03/ d04/ d05/ d06/ d07/ d08/ d09/";
-        assert_eq!(fingerprint(tmp.path(), WalkConfig::default()), expected);
+        assert_eq!(
+            fingerprint(tmp.path(), WalkConfig::default(), far_off()),
+            expected
+        );
     }
 
     /// A tree holding each of `files`, a path relative to its root, with
@@ -908,7 +996,7 @@ mod tests {
             "pkg/mod/sub/deeper/d.py",
         ]);
         assert_eq!(
-            fingerprint(tmp.path(), WalkConfig::default()),
+            fingerprint(tmp.path(), WalkConfig::default(), far_off()),
             "[tilth] Python project — 4 source files, 1 directory\n  dirs: pkg/mod/"
         );
     }
@@ -920,7 +1008,7 @@ mod tests {
         let tmp = tree_of_files(&["app/a.py", "app/b.py", "gen/x.py", "gen/y.py", "gen/z.py"]);
         fs::write(tmp.path().join(".tilthignore"), "gen/\n").unwrap();
         assert_eq!(
-            fingerprint(tmp.path(), WalkConfig::default()),
+            fingerprint(tmp.path(), WalkConfig::default(), far_off()),
             "[tilth] Python project — 2 source files, 1 directory\n  dirs: app/"
         );
     }
@@ -935,7 +1023,7 @@ mod tests {
                 respect_gitignore,
                 ..WalkConfig::default()
             };
-            fingerprint(tmp.path(), walk)
+            fingerprint(tmp.path(), walk, far_off())
                 .lines()
                 .next()
                 .map(str::to_string)
@@ -957,7 +1045,7 @@ mod tests {
     fn a_count_cut_short_says_so() {
         let tmp = tree_of_files(&["app/a.py", "app/b.py", "app/c.py"]);
         let header = |cap| {
-            fingerprint_inner(tmp.path(), WalkConfig::default(), cap)
+            fingerprint_inner(tmp.path(), WalkConfig::default(), cap, far_off())
                 .lines()
                 .next()
                 .map(str::to_string)
@@ -981,7 +1069,7 @@ mod tests {
             format!("{{\"dependencies\": {{{}}}}}", deps.join(", ")),
         )
         .unwrap();
-        let summary = fingerprint(tmp.path(), WalkConfig::default());
+        let summary = fingerprint(tmp.path(), WalkConfig::default(), far_off());
         summary
             .lines()
             .find(|line| line.starts_with("  deps: "))
@@ -1021,8 +1109,8 @@ mod tests {
             )
             .unwrap();
         }
-        let sample = sample_files(tmp.path(), WalkConfig::default());
-        hot_files(tmp.path(), &sample, Some(Lang::Rust))
+        let sample = sample_files(tmp.path(), WalkConfig::default(), far_off());
+        hot_files(tmp.path(), sample.as_ref(), Some(Lang::Rust), far_off())
     }
 
     /// The summary listed five hot files and said nothing of the rest
@@ -1126,10 +1214,61 @@ mod tests {
         assert_eq!(git_context(repo.path(), Instant::now()), None);
     }
 
+    /// The 250 ms budget was a log line: the overview measured its time,
+    /// wrote to stderr when it ran over, and did all the work anyway
+    /// (#385). Each part now checks the deadline, so one already past
+    /// starts no part at all. This tree has a line of every kind, so each
+    /// part is shown to have work to skip.
+    #[test]
+    fn a_deadline_already_past_gives_no_overview() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let walk = WalkConfig::default();
+        let past = Instant::now();
+
+        assert!(count_sources(root, walk, COUNT_CAP, far_off()).is_some());
+        assert!(count_sources(root, walk, COUNT_CAP, past).is_none());
+
+        let sample = sample_files(root, walk, far_off());
+        assert!(sample.is_some());
+        assert!(sample_files(root, walk, past).is_none());
+
+        let rust = Some(Lang::Rust);
+        assert!(hot_files(root, sample.as_ref(), rust, far_off()).is_some());
+        assert_eq!(hot_files(root, sample.as_ref(), rust, past), None);
+        assert!(test_style(root, sample.as_ref(), rust, far_off()).is_some());
+        assert_eq!(test_style(root, sample.as_ref(), rust, past), None);
+        // Without Rust the line reads no files, and still starts no later.
+        assert!(test_style(root, sample.as_ref(), None, far_off()).is_some());
+        assert_eq!(test_style(root, sample.as_ref(), None, past), None);
+
+        assert_eq!(fingerprint(root, walk, past), "");
+    }
+
+    /// The overview of a tree of 100,000 small files, all within the
+    /// sample's depth, ends within its limit and one step. Wall time is
+    /// measured here, never asserted in CI.
+    #[test]
+    #[ignore = "measures wall time: cargo test --release -- --ignored a_tree_of_100k"]
+    fn a_tree_of_100k_files_ends_within_the_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        for d in 0..100 {
+            let dir = tmp.path().join(format!("d{d:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            for f in 0..1000 {
+                fs::write(dir.join(format!("f{f:04}.py")), "x = 1\n").unwrap();
+            }
+        }
+        let start = Instant::now();
+        let summary = fingerprint(tmp.path(), WalkConfig::default(), start + LIMIT);
+        let elapsed = start.elapsed();
+        println!("{}ms\n{summary}", elapsed.as_millis());
+        assert!(elapsed < LIMIT + Duration::from_millis(50), "{elapsed:?}");
+    }
+
     #[test]
     fn test_fingerprint_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let output = fingerprint(tmp.path(), WalkConfig::default());
+        let output = fingerprint(tmp.path(), WalkConfig::default(), far_off());
 
         // Empty dir: should produce minimal output or empty
         // With 0 files and 0 modules, the header will say "0 source files"
