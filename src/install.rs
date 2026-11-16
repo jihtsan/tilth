@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::diag;
+use tilth_core::shown;
 
 // Supported MCP hosts and their config locations.
 //
@@ -83,7 +84,7 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
 
     if let Some(parent) = host_info.path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            .map_err(|e| format!("failed to create {}: {e}", shown::path(parent)))?;
     }
 
     match host_info.format {
@@ -96,12 +97,12 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
     if edit {
         diag::emit(format_args!(
             "✓ tilth (edit mode) added to {}",
-            host_info.path.display()
+            shown::path(&host_info.path)
         ));
     } else {
         diag::emit(format_args!(
             "✓ tilth added to {}",
-            host_info.path.display()
+            shown::path(&host_info.path)
         ));
     }
     if let Some(note) = host_info.note {
@@ -114,7 +115,7 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
 /// then rename over the target so an interrupted write never truncates `path`.
 fn atomic_write(path: &std::path::Path, content: &str) -> Result<(), String> {
     crate::util::atomic_write_bytes(path, content.as_bytes())
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+        .map_err(|e| format!("failed to write {}: {e}", shown::path(path)))
 }
 
 #[expect(
@@ -129,9 +130,9 @@ fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
 
     let mut config: Value = if host_info.path.exists() {
         let raw = fs::read_to_string(&host_info.path)
-            .map_err(|e| format!("failed to read {}: {e}", host_info.path.display()))?;
+            .map_err(|e| format!("failed to read {}: {e}", shown::path(&host_info.path)))?;
         serde_json::from_str(&raw)
-            .map_err(|e| format!("invalid JSON in {}: {e}", host_info.path.display()))?
+            .map_err(|e| format!("invalid JSON in {}: {e}", shown::path(&host_info.path)))?
     } else {
         json!({})
     };
@@ -169,7 +170,7 @@ fn write_toml_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
 
     let existing = if host_info.path.exists() {
         fs::read_to_string(&host_info.path)
-            .map_err(|e| format!("failed to read {}: {e}", host_info.path.display()))?
+            .map_err(|e| format!("failed to read {}: {e}", shown::path(&host_info.path)))?
     } else {
         String::new()
     };
@@ -738,7 +739,7 @@ mod tests {
         assert!(
             info.path.ends_with(".gemini/config/mcp_config.json"),
             "path should end with .gemini/config/mcp_config.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => assert_eq!(servers_key, "mcpServers"),
@@ -755,7 +756,7 @@ mod tests {
         assert!(
             info.path.ends_with(".config/amp/settings.json"),
             "path should end with .config/amp/settings.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -832,7 +833,7 @@ mod tests {
         assert!(
             info.path.ends_with(".factory/mcp.json"),
             "path should end with .factory/mcp.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -874,7 +875,7 @@ mod tests {
         assert!(
             info.path.ends_with(".gemini/antigravity/mcp_config.json"),
             "path should end with .gemini/antigravity/mcp_config.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -918,7 +919,7 @@ mod tests {
         assert!(
             info.path.ends_with(".config/zed/settings.json"),
             "path should end with .config/zed/settings.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -949,7 +950,7 @@ mod tests {
         assert!(
             info.path.ends_with(".copilot/mcp-config.json"),
             "path should end with .copilot/mcp-config.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -968,7 +969,7 @@ mod tests {
         assert!(
             info.path.ends_with(".augment/settings.json"),
             "path should end with .augment/settings.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -987,7 +988,7 @@ mod tests {
         assert!(
             info.path.ends_with(".kiro/settings/mcp.json"),
             "path should end with .kiro/settings/mcp.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -1061,7 +1062,7 @@ mod tests {
         assert!(
             info.path.ends_with(".trae/mcp.json"),
             "path should end with .trae/mcp.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -1082,7 +1083,7 @@ mod tests {
         assert!(
             info.path.ends_with(".qwen/settings.json"),
             "path should end with .qwen/settings.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -1101,7 +1102,7 @@ mod tests {
         assert!(
             info.path.ends_with(".config/crush/crush.json"),
             "path should end with .config/crush/crush.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -1129,7 +1130,7 @@ mod tests {
         assert!(
             info.path.ends_with(".pi/agent/mcp.json"),
             "path should end with .pi/agent/mcp.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::Json { servers_key } => {
@@ -1157,7 +1158,7 @@ mod tests {
         assert!(
             info.path.ends_with(".config/opencode/opencode.json"),
             "path should end with .config/opencode/opencode.json, got: {}",
-            info.path.display()
+            shown::path(&info.path)
         );
         match info.format {
             ConfigFormat::JsonLocal { servers_key } => {

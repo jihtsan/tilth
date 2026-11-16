@@ -11,6 +11,7 @@ use rayon::prelude::*;
 
 use tilth_core::error::TilthError;
 use tilth_core::search::walk::{Walk, WalkConfig};
+use tilth_core::shown;
 use tilth_core::source::OpenFile;
 use tilth_core::types::OutlineKind;
 
@@ -486,7 +487,7 @@ pub fn diff(
         if files.is_empty() && !raw.trim().is_empty() {
             return Err(format!(
                 "{} names no file: a unified diff has a `--- ` and a `+++ ` line before each file's hunks",
-                path.display()
+                shown::path(path)
             ));
         }
     }
@@ -733,7 +734,7 @@ impl ScopeSpec {
             many => {
                 let names: Vec<String> = many
                     .iter()
-                    .map(|(_, _, o)| o.path.display().to_string())
+                    .map(|(_, _, o)| shown::path(&o.path).to_string())
                     .collect();
                 return Err(format!(
                     "'{}' matches {} changed files: {}. Give the path from the repository root.",
@@ -805,8 +806,8 @@ fn source_label(source: &DiffSource) -> String {
         DiffSource::GitUncommitted => "uncommitted".to_string(),
         DiffSource::GitStaged => "staged".to_string(),
         DiffSource::GitRef(r) => r.clone(),
-        DiffSource::Files(a, b) => format!("{} vs {}", a.display(), b.display()),
-        DiffSource::Patch(p) => format!("patch: {}", p.display()),
+        DiffSource::Files(a, b) => format!("{} vs {}", shown::path(a), shown::path(b)),
+        DiffSource::Patch(p) => format!("patch: {}", shown::path(p)),
         DiffSource::Log(r) => format!("log: {r}"),
     }
 }

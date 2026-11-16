@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::format::{fmt_tokens, noun};
 use crate::types::estimate_tokens;
+use tilth_core::shown;
 
 #[derive(Debug, Default)]
 struct DirNode {
@@ -49,7 +50,8 @@ fn render_dir(name: &str, node: &DirNode, prefix: &str, out: &mut String, is_roo
     if is_root {
         let _ = writeln!(
             out,
-            "{name}/      {}   {}",
+            "{}/      {}   {}",
+            shown::path(name),
             tokens_label(node.total_bytes),
             files_label(node.file_count)
         );
@@ -73,7 +75,8 @@ fn render_dir(name: &str, node: &DirNode, prefix: &str, out: &mut String, is_roo
         if let Some(child) = child {
             let _ = writeln!(
                 out,
-                "{prefix}{connector}{name}/      {}   {}",
+                "{prefix}{connector}{}/      {}   {}",
+                shown::path(name),
                 tokens_label(*bytes),
                 files_label(child.file_count)
             );
@@ -82,7 +85,8 @@ fn render_dir(name: &str, node: &DirNode, prefix: &str, out: &mut String, is_roo
         } else {
             let _ = writeln!(
                 out,
-                "{prefix}{connector}{name}      {}",
+                "{prefix}{connector}{}      {}",
+                shown::path(name),
                 tokens_label(*bytes)
             );
         }

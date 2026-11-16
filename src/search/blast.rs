@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::edit::Edit;
-use crate::format::noun;
+use crate::format::{noun, rel};
 use tilth_core::lang::detect_file_type_with_content;
 use tilth_core::lang::outline::get_outline_entries;
 use tilth_core::search::callers::find_callers_batch;
@@ -196,7 +196,6 @@ fn format_blast_radius(
     scope: &Path,
 ) -> String {
     let mut out = String::from("\n── blast radius ──\n");
-    let rel = |p: &Path| p.strip_prefix(scope).unwrap_or(p).display().to_string();
 
     // Emit per-symbol prod callers in touched order (preserves definition order).
     for ts in touched {
@@ -232,7 +231,7 @@ fn format_blast_radius(
             .flat_map(|c| c.first.iter())
             .take(PROD_CALLERS_LISTED);
         for (path, line, calling_function) in listed {
-            let _ = writeln!(out, "  {}:{}  {}", rel(path), line, calling_function);
+            let _ = writeln!(out, "  {}:{}  {}", rel(path, scope), line, calling_function);
         }
 
         if total > PROD_CALLERS_LISTED {
@@ -244,7 +243,7 @@ fn format_blast_radius(
     // Test summary — test files by how many calls they make, across all symbols.
     let mut test_files: Vec<(String, usize)> = files
         .iter()
-        .filter_map(|f| f.test_path.as_ref().map(|p| (rel(p), f.tests)))
+        .filter_map(|f| f.test_path.as_ref().map(|p| (rel(p, scope), f.tests)))
         .collect();
 
     if !test_files.is_empty() {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::format::{and_more, noun};
+use crate::format::{and_more, noun, rel};
 use tilth_core::search::deps::{Dependent, DepsResult, LocalDep, MAX_EXPORTED_SYMBOLS};
 
 /// Dependents an import or the target's package confirms listed before the
@@ -115,12 +115,7 @@ pub fn format_deps(result: &DepsResult, scope: &Path, budget: Option<usize>, ful
     // ── Build sections (full fidelity first) ─────────────────────────────────
 
     // Header, with the note that explains its by-name count.
-    let rel_target = result
-        .target
-        .strip_prefix(scope)
-        .unwrap_or(&result.target)
-        .display()
-        .to_string();
+    let rel_target = rel(&result.target, scope);
     let mut header = format!(
         "# Deps: {} — {} local, {} external, {} {}",
         rel_target,
@@ -236,12 +231,7 @@ fn format_uses_local(deps: &[LocalDep], scope: &Path, with_symbols: bool) -> Str
     }
     let mut out = String::from("## Uses (local)");
     for dep in deps {
-        let rel = dep
-            .path
-            .strip_prefix(scope)
-            .unwrap_or(&dep.path)
-            .display()
-            .to_string();
+        let rel = rel(&dep.path, scope);
         if with_symbols && !dep.symbols.is_empty() {
             let _ = write!(out, "\n{:<30} {}", rel, dep.symbols.join(", "));
         } else {
@@ -270,12 +260,7 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
     }
     let mut out = String::from(heading);
     for dep in deps {
-        let rel = dep
-            .path
-            .strip_prefix(scope)
-            .unwrap_or(&dep.path)
-            .display()
-            .to_string();
+        let file = rel(&dep.path, scope);
         // Group by (caller, line) for readability — keep the earliest line per caller
         let mut by_caller: HashMap<&str, (u32, Vec<&str>)> = HashMap::new();
         for (caller, symbol, line) in &dep.symbols {
@@ -293,7 +278,7 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
         let how = Link::of(dep).mark();
         // The file's first row says how it was found, and its other rows follow it.
         for (i, (caller, line, syms)) in callers.iter().enumerate() {
-            let loc = format!("{rel}:{line}");
+            let loc = format!("{file}:{line}");
             let joined = syms.join(", ");
             let _ = write!(out, "\n{loc:<30} {caller:<20} \u{2192} {joined}");
             if i == 0 {
@@ -303,10 +288,10 @@ fn format_used_by(deps: &[&Dependent], scope: &Path, heading: &str) -> String {
         // A file that imports the target without calling it.
         if callers.is_empty() {
             if let Some(line) = dep.import_lines.first() {
-                let loc = format!("{rel}:{line}");
+                let loc = format!("{file}:{line}");
                 match &dep.via {
                     Some(via) => {
-                        let via = via.strip_prefix(scope).unwrap_or(via).display();
+                        let via = rel(via, scope);
                         let _ = write!(out, "\n{loc:<30} imports it through {via}");
                     }
                     None => {

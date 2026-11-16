@@ -22,6 +22,10 @@ allow-dbg-in-tests = true
 # `tilth_core::source::read_to_string`, and each other strict read carries
 # an #[expect] that names its issue.
 
+# A path becomes text only through `tilth_core::shown::path`, which quotes
+# and escapes a name holding a control character so it cannot end the line
+# it is printed on and forge a result line (#387).
+
 # Every directory walk starts from `tilth_core::search::walk`, so each one
 # skips `SKIP_DIRS` and `.tilthignore` and follows the gitignore setting.
 
@@ -49,6 +53,7 @@ disallowed-methods = [
   { path = "std::io::Read::read_to_string", reason = "read a file's bytes as text through `tilth_core::source::into_text`, the one text and binary rule" },
   { path = "std::io::read_to_string", reason = "read a file's bytes as text through `tilth_core::source::into_text`, the one text and binary rule" },
   { path = "tilth_core::source::read_to_string", reason = "a strict read, for the hash-anchored writes only; read text through `tilth_core::source::read_source` or `into_text`" },
+  { path = "std::path::Path::display", reason = "print a path through `tilth_core::shown::path`, which escapes a name that would break the line (#387)" },
   { path = "ignore::WalkBuilder::new", reason = "walk through `tilth_core::search::walk`, which holds the one ignore policy" },
   { path = "ignore::Walk::new", reason = "walk through `tilth_core::search::walk`, which holds the one ignore policy" },
 ]

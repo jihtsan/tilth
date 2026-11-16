@@ -871,7 +871,7 @@ mod tests {
             .used_by
             .into_iter()
             .map(|d| {
-                let rel = |p: &Path| p.strip_prefix(root).unwrap().display().to_string();
+                let rel = |p: &Path| p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
                 (
                     rel(&d.path),
                     d.symbols.into_iter().map(|(_, s, _)| s).collect(),
@@ -1450,7 +1450,12 @@ mod tests {
             .used_by
             .iter()
             .map(|d| {
-                let rel = d.path.strip_prefix(&root).unwrap().display().to_string();
+                let rel = d
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 (rel, d.same_package)
             })
             .collect();

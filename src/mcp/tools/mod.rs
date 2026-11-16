@@ -21,6 +21,7 @@ pub(super) use write::tool_write;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tilth_core::shown;
 
 /// Anchor a caller-supplied path/scope under the absolute-path discipline:
 /// the server cannot see the caller's live directory, so a relative path is
@@ -46,13 +47,13 @@ fn anchor_path(
         Some(r) => Err(format!(
             "relative {label} \"{}\" cannot be resolved: \"root\" is itself relative (\"{}\"). \
              Set \"root\" to an absolute checkout directory (the server cannot see your shell's cwd).",
-            raw.display(),
-            r.display(),
+            shown::path(raw),
+            shown::path(r),
         )),
         None => Err(format!(
             "relative {label} \"{}\" cannot be resolved: pass an absolute {label}, or set \"root\" \
              to an absolute checkout directory (the server cannot see your shell's cwd).",
-            raw.display(),
+            shown::path(raw),
         )),
     }
 }
@@ -288,7 +289,7 @@ mod tests {
         let err = resolve_scope(&args, None, None, Glob).unwrap_err();
         let want = tmp.path().join("src/search");
         assert!(
-            err.contains(&format!("Did you mean \"{}\"?", want.display())),
+            err.contains(&format!("Did you mean \"{}\"?", shown::path(&want))),
             "{err}"
         );
     }
