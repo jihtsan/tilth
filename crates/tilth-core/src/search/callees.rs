@@ -464,6 +464,27 @@ mod tests {
         );
     }
 
+    /// A definition's head is a `call` node to tree-sitter-elixir, so the
+    /// function a range defines once counted among the functions it calls
+    /// (#377). A recursive call in the body still counts.
+    #[test]
+    fn an_elixir_definition_head_is_not_its_own_callee() {
+        let elixir = "defmodule M do\n\
+                      \x20 def run(x) when is_map(x) do\n\
+                      \x20   x |> build() |> run()\n\
+                      \x20 end\n\
+                      \x20 def build(x), do: x\n\
+                      end\n";
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((2, 4))),
+            ["build", "is_map", "run"]
+        );
+        assert_eq!(
+            extract_callee_names(elixir, Lang::Elixir, Some((5, 5))),
+            Vec::<String>::new()
+        );
+    }
+
     /// An attribute's argument list is a `token_tree` as well, and the
     /// expressions in one do run — thiserror compiles `#[error(..)]` arguments
     /// into `Display`. Reaching them is deliberate; the cost is that `cfg`
