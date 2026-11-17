@@ -18,8 +18,8 @@ use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use tilth_core::error::TilthError;
-use tilth_core::lang::detect_file_type_with_content;
 use tilth_core::lang::outline::{heading_text, outline_language, parse_markdown};
+use tilth_core::lang::{detect_file_type, detect_file_type_with_content};
 use tilth_core::search::scope::{
     definition_owner, names_definition, names_module, split_qualified,
 };
@@ -36,7 +36,7 @@ const FULL_MAX_MATCHES: usize = 100;
 /// real code defs in favor of markdown-heading defs of the same query.
 fn stratum_for_display(m: &Match) -> u8 {
     if m.is_definition {
-        u8::from(m.def_weight < 60)
+        u8::from(matches!(detect_file_type(&m.path), FileType::Markdown))
     } else {
         2
     }
@@ -420,8 +420,8 @@ fn definitions_in(
     //   docs are NOT treated as definitions; they're usages, because
     //   the keyword heuristic would false-positive on every snippet
     //   that quotes the real source. Heading defs carry a lower
-    //   `def_weight` (30) than code definitions (60-80) so the real
-    //   source still ranks first.
+    //   `def_weight` (30) for relevance scoring. Display ordering puts
+    //   headings below every code definition, regardless of weight.
     // * Structured data / tabular / log / other: no fallback.
     //   Mentions are config values, data, or noise — not definitions.
     //   (A future patch could treat top-level config keys matching
@@ -940,9 +940,7 @@ fn emit_md_section_match(
         // body — the markdown analogue of a code definition's body.
         def_range: Some((heading_line, section_end)),
         def_name: Some(query.to_string()),
-        // Soft definition — code definitions are 60-80, usages 0. Sits
-        // between them so docs headings outrank passing mentions but
-        // never outrank the real source.
+        // Soft definition: use a lower relevance weight for headings.
         def_weight: 30,
         impl_target: None,
     });
@@ -1522,12 +1520,42 @@ Body to end.
     }
 
     #[test]
+    fn symbol_cap_keeps_low_weight_code_before_markdown_headings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("definitions.js"),
+            "export const fooBar = () => 1;\n",
+        )
+        .expect("write code");
+        let docs = dir.path().join("fooBar.md");
+        let sections = "## fooBar option\n\nExplanation.\n\n".repeat(12);
+        std::fs::write(&docs, sections).expect("write docs");
+
+        let result = search(
+            "fooBar",
+            Walk::new(dir.path(), WalkConfig::default()),
+            None,
+            false,
+        )
+        .expect("search");
+        assert_eq!(result.code_definitions, 1);
+        assert_eq!(result.definitions, 13);
+        assert_eq!(result.matches.len(), MAX_MATCHES);
+        assert!(result.matches[0].path.ends_with("definitions.js"));
+        assert!(result.matches[0].is_definition);
+        assert!(result.matches[0].def_weight < 60);
+        assert!(result.matches[1..]
+            .iter()
+            .all(|m| m.path == docs && m.is_definition));
+    }
+
+    #[test]
     fn stratify_for_display_keeps_code_defs_above_doc_defs() {
         // When the cap drops matches, real code defs must keep their slots
         // and doc-heading defs slide below them. Rank order within each
         // stratum is preserved by the stable sort.
-        let mk = |line: u32, weight: u16, is_definition: bool| Match {
-            path: PathBuf::from("test.rs"),
+        let mk = |path: &str, line: u32, weight: u16, is_definition: bool| Match {
+            path: PathBuf::from(path),
             line,
             text: String::new(),
             is_definition,
@@ -1542,11 +1570,11 @@ Body to end.
 
         // Pre-cap order (after rank::sort): doc def, code def, doc def, code def, usage.
         let mut matches = vec![
-            mk(1, 30, true), // doc def — high relevance
-            mk(2, 70, true), // code def
-            mk(3, 30, true), // doc def
-            mk(4, 70, true), // code def
-            mk(5, 0, false), // usage
+            mk("test.md", 1, 30, true), // doc def — high relevance
+            mk("test.js", 2, 40, true), // low-weight code def
+            mk("test.md", 3, 30, true), // doc def
+            mk("test.rs", 4, 70, true), // code def
+            mk("test.md", 5, 0, false), // usage
         ];
         matches.sort_by_key(stratum_for_display);
 
@@ -1558,7 +1586,9 @@ Body to end.
         // Truncate-to-2 should keep both code defs, drop both doc defs.
         matches.truncate(2);
         assert!(
-            matches.iter().all(|m| m.def_weight >= 60),
+            matches
+                .iter()
+                .all(|m| m.path.extension().is_some_and(|e| e != "md")),
             "displayed slice after cap must be all code defs, got {:?}",
             matches.iter().map(|m| m.def_weight).collect::<Vec<_>>()
         );
